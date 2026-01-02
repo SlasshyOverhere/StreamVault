@@ -3,6 +3,11 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+// Constants for retry logic
+const MAX_RETRIES: u32 = 5;
+const BASE_DELAY_MS: u64 = 500;
+const MAX_DELAY_MS: u64 = 10000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TmdbMetadata {
     pub title: String,
@@ -10,6 +15,26 @@ pub struct TmdbMetadata {
     pub overview: Option<String>,
     pub poster_path: Option<String>,
     pub tmdb_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TmdbSeasonInfo {
+    pub season_number: i32,
+    pub name: String,
+    pub overview: Option<String>,
+    pub poster_path: Option<String>,
+    pub episode_count: i32,
+    pub episodes: Vec<TmdbEpisodeInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TmdbEpisodeInfo {
+    pub episode_number: i32,
+    pub season_number: i32,
+    pub name: String,
+    pub overview: Option<String>,
+    pub still_path: Option<String>,
+    pub air_date: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -72,15 +97,92 @@ fn build_tmdb_url(base_path: &str, credential: &str, extra_params: &str) -> Stri
     }
 }
 
-/// Execute a TMDB request with proper authentication
+/// Execute a TMDB request with proper authentication and robust retry logic
 fn tmdb_request(client: &reqwest::blocking::Client, url: &str, credential: &str) -> Result<reqwest::blocking::Response, reqwest::Error> {
-    if is_access_token(credential) {
-        client.get(url)
-            .header("Authorization", format!("Bearer {}", credential))
-            .send()
-    } else {
-        client.get(url).send()
+    tmdb_request_with_retry(client, url, credential, MAX_RETRIES)
+}
+
+/// Execute a TMDB request with retry and exponential backoff
+fn tmdb_request_with_retry(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    credential: &str,
+    max_retries: u32,
+) -> Result<reqwest::blocking::Response, reqwest::Error> {
+    let mut last_error: Option<reqwest::Error> = None;
+
+    for attempt in 0..max_retries {
+        if attempt > 0 {
+            // Exponential backoff with jitter
+            let delay = std::cmp::min(BASE_DELAY_MS * (1 << attempt), MAX_DELAY_MS);
+            let jitter = (rand_simple() * delay as f64 * 0.3) as u64;
+            let total_delay = delay + jitter;
+            println!("[TMDB] Retry attempt {} after {}ms delay", attempt + 1, total_delay);
+            std::thread::sleep(std::time::Duration::from_millis(total_delay));
+        }
+
+        let result = if is_access_token(credential) {
+            client.get(url)
+                .header("Authorization", format!("Bearer {}", credential))
+                .send()
+        } else {
+            client.get(url).send()
+        };
+
+        match result {
+            Ok(response) => {
+                // Check for rate limiting (429) or server errors (5xx)
+                let status = response.status();
+                if status.as_u16() == 429 {
+                    println!("[TMDB] Rate limited (429), will retry...");
+                    // Try to get retry-after header
+                    if let Some(retry_after) = response.headers().get("retry-after") {
+                        if let Ok(secs) = retry_after.to_str().unwrap_or("1").parse::<u64>() {
+                            println!("[TMDB] Retry-After header: {} seconds", secs);
+                            std::thread::sleep(std::time::Duration::from_secs(secs.min(30)));
+                        }
+                    }
+                    continue;
+                }
+                if status.is_server_error() {
+                    println!("[TMDB] Server error ({}), will retry...", status);
+                    continue;
+                }
+                return Ok(response);
+            }
+            Err(e) => {
+                let error_str = e.to_string();
+                println!("[TMDB] Request failed (attempt {}): {}", attempt + 1, error_str);
+
+                // Check for retryable errors
+                let is_retryable = error_str.contains("10054")  // Connection reset (Windows)
+                    || error_str.contains("connection")
+                    || error_str.contains("timeout")
+                    || error_str.contains("timed out")
+                    || error_str.contains("Network")
+                    || error_str.contains("closed");
+
+                if is_retryable && attempt < max_retries - 1 {
+                    last_error = Some(e);
+                    continue;
+                }
+
+                return Err(e);
+            }
+        }
     }
+
+    Err(last_error.unwrap())
+}
+
+/// Simple pseudo-random number generator (0.0 - 1.0)
+fn rand_simple() -> f64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    (nanos % 1000) as f64 / 1000.0
 }
 
 /// Normalize a title for comparison (remove punctuation, lowercase, etc.)
@@ -416,7 +518,7 @@ fn do_search(
 
     if let Some(item) = best {
         if item.poster_path.is_some() || item.backdrop_path.is_some() || !strict {
-            return create_metadata_from_item(&item, image_cache_dir);
+            return create_metadata_from_item(&item, image_cache_dir, media_type);
         }
         println!("[TMDB]   -> Best match has no images, skipping in strict mode");
     }
@@ -523,7 +625,8 @@ fn do_multi_search(
             popularity: item.popularity,
             vote_count: item.vote_count,
         };
-        return create_metadata_from_item(&tmdb_item, image_cache_dir);
+        let actual_type = item.media_type.as_deref().unwrap_or(preferred_type);
+        return create_metadata_from_item(&tmdb_item, image_cache_dir, actual_type);
     }
     
     Ok(None)
@@ -630,29 +733,39 @@ fn find_best_match<'a>(results: &'a [TmdbItem], search_title: &str, search_year:
 fn create_metadata_from_item(
     item: &TmdbItem,
     image_cache_dir: &str,
+    media_type: &str,
 ) -> Result<Option<TmdbMetadata>, Box<dyn std::error::Error + Send + Sync>> {
     let found_title = item.title.clone()
         .or_else(|| item.original_title.clone())
         .unwrap_or_default();
-    
+
     let found_year = item.release_date.as_ref()
         .and_then(|d| d.split('-').next())
         .and_then(|y| y.parse().ok());
-    
+
     println!("[TMDB]   -> Match: '{}' ({:?})", found_title, found_year);
-    
-    // Try to get poster first, then backdrop
+
+    // Use appropriate image type based on media type
+    let image_type = if media_type == "tv" {
+        ImageType::SeriesBanner
+    } else {
+        ImageType::MovieBanner
+    };
+
+    // Try to get poster first, then backdrop - use organized caching
     let poster_path = if let Some(ref poster) = item.poster_path {
         println!("[TMDB]   -> Has poster: {}", poster);
-        cache_image_with_fallback(poster, image_cache_dir)
+        cache_image_organized(poster, image_cache_dir, &found_title, image_type.clone())
+            .or_else(|| cache_image_with_fallback(poster, image_cache_dir))
     } else if let Some(ref backdrop) = item.backdrop_path {
         println!("[TMDB]   -> No poster, using backdrop: {}", backdrop);
-        cache_image_with_fallback(backdrop, image_cache_dir)
+        cache_image_organized(backdrop, image_cache_dir, &found_title, image_type)
+            .or_else(|| cache_image_with_fallback(backdrop, image_cache_dir))
     } else {
         println!("[TMDB]   -> No poster or backdrop available");
         None
     };
-    
+
     Ok(Some(TmdbMetadata {
         title: found_title,
         year: found_year,
@@ -738,18 +851,19 @@ pub fn fetch_metadata_by_id(
             return Err(format!("Failed to fetch metadata for ID {}", final_id).into());
         }
         let item: TmdbItem = alt_response.json()?;
-        return create_metadata_from_item_required(&item, image_cache_dir);
+        return create_metadata_from_item_required(&item, image_cache_dir, alt_type);
     }
-    
+
     let item: TmdbItem = response.json()?;
-    create_metadata_from_item_required(&item, image_cache_dir)
+    create_metadata_from_item_required(&item, image_cache_dir, media_type)
 }
 
 fn create_metadata_from_item_required(
     item: &TmdbItem,
     image_cache_dir: &str,
+    media_type: &str,
 ) -> Result<TmdbMetadata, Box<dyn std::error::Error + Send + Sync>> {
-    create_metadata_from_item(item, image_cache_dir)?
+    create_metadata_from_item(item, image_cache_dir, media_type)?
         .ok_or_else(|| "Failed to create metadata".into())
 }
 
@@ -796,17 +910,17 @@ fn extract_id_from_input(input: &str) -> (String, &str) {
 
 /// Cache image from TMDB
 fn cache_image(
-    image_path: &str, 
-    cache_dir: &str, 
+    image_path: &str,
+    cache_dir: &str,
     size: &str
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let filename = Path::new(image_path)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown.jpg");
-    
+
     let local_path = Path::new(cache_dir).join(filename);
-    
+
     if local_path.exists() {
         // Check if file is not empty
         if let Ok(metadata) = std::fs::metadata(&local_path) {
@@ -817,25 +931,477 @@ fn cache_image(
             let _ = std::fs::remove_file(&local_path);
         }
     }
-    
+
     let image_url = format!("https://image.tmdb.org/t/p/{}{}", size, image_path);
-    
+
     let client = build_client()?;
     let response = client.get(&image_url).send()?;
-    
+
     if !response.status().is_success() {
         return Err(format!("Failed to download image: HTTP {}", response.status()).into());
     }
-    
+
     let bytes = response.bytes()?;
-    
+
     if bytes.len() < 100 {
         return Err("Downloaded image is too small (likely invalid)".into());
     }
-    
+
     fs::create_dir_all(cache_dir)?;
     let mut file = fs::File::create(&local_path)?;
     file.write_all(&bytes)?;
-    
+
     Ok(format!("image_cache/{}", filename))
+}
+
+/// Create a slug from a title (for folder/file naming)
+fn create_slug(title: &str) -> String {
+    title
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect::<String>()
+        .split('_')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+/// Cache image with organized folder structure
+/// For series: image_cache/{series_slug}/{series_slug}_banner.jpg
+/// For episodes: image_cache/{series_slug}/{series_slug}_s{season}e{episode}_banner.jpg
+/// For movies: image_cache/{movie_slug}_banner.jpg
+pub fn cache_image_organized(
+    image_path: &str,
+    cache_dir: &str,
+    title: &str,
+    image_type: ImageType,
+) -> Option<String> {
+    let slug = create_slug(title);
+
+    let (subfolder, filename) = match image_type {
+        ImageType::SeriesBanner => {
+            let subfolder = slug.clone();
+            let filename = format!("{}_banner.jpg", slug);
+            (Some(subfolder), filename)
+        }
+        ImageType::EpisodeBanner { season, episode } => {
+            let subfolder = slug.clone();
+            let filename = format!("{}_s{}e{}_banner.jpg", slug, season, episode);
+            (Some(subfolder), filename)
+        }
+        ImageType::MovieBanner => {
+            let filename = format!("{}_banner.jpg", slug);
+            (None, filename)
+        }
+    };
+
+    let target_dir = if let Some(ref sub) = subfolder {
+        Path::new(cache_dir).join(sub)
+    } else {
+        Path::new(cache_dir).to_path_buf()
+    };
+
+    // Create the directory if needed
+    if let Err(e) = fs::create_dir_all(&target_dir) {
+        println!("[TMDB] Failed to create directory {:?}: {}", target_dir, e);
+        return None;
+    }
+
+    let local_path = target_dir.join(&filename);
+
+    // Check if already exists and valid
+    if local_path.exists() {
+        if let Ok(metadata) = std::fs::metadata(&local_path) {
+            if metadata.len() > 100 {
+                return Some(format_image_path(&subfolder, &filename));
+            }
+            let _ = std::fs::remove_file(&local_path);
+        }
+    }
+
+    // Try different sizes with retry logic
+    let sizes = ["w500", "w342", "w185", "original"];
+
+    for size in &sizes {
+        let image_url = format!("https://image.tmdb.org/t/p/{}{}", size, image_path);
+
+        // Retry logic for image download
+        for attempt in 0..3 {
+            if attempt > 0 {
+                let delay = BASE_DELAY_MS * (1 << attempt);
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
+
+            if let Ok(client) = build_client() {
+                match client.get(&image_url).send() {
+                    Ok(response) => {
+                        if response.status().is_success() {
+                            if let Ok(bytes) = response.bytes() {
+                                if bytes.len() > 100 {
+                                    if let Ok(mut file) = fs::File::create(&local_path) {
+                                        if file.write_all(&bytes).is_ok() {
+                                            println!("[TMDB] Cached image: {:?} (size: {})", local_path, size);
+                                            return Some(format_image_path(&subfolder, &filename));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Non-success status, try next size
+                        break;
+                    }
+                    Err(e) => {
+                        let error_str = e.to_string();
+                        let is_retryable = error_str.contains("10054")
+                            || error_str.contains("connection")
+                            || error_str.contains("timeout");
+                        if !is_retryable {
+                            break;
+                        }
+                        println!("[TMDB] Image download retry {} for {}: {}", attempt + 1, size, error_str);
+                    }
+                }
+            }
+        }
+    }
+
+    println!("[TMDB] Failed to cache image: {}", image_path);
+    None
+}
+
+fn format_image_path(subfolder: &Option<String>, filename: &str) -> String {
+    if let Some(ref sub) = subfolder {
+        format!("image_cache/{}/{}", sub, filename)
+    } else {
+        format!("image_cache/{}", filename)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ImageType {
+    SeriesBanner,
+    EpisodeBanner { season: i32, episode: i32 },
+    MovieBanner,
+}
+
+/// Fetch TV show details including number of seasons
+pub fn fetch_tv_show_details(
+    api_key: &str,
+    tmdb_id: &str,
+) -> Result<TvShowDetails, Box<dyn std::error::Error + Send + Sync>> {
+    println!("[TMDB] Fetching TV show details for ID: {}", tmdb_id);
+
+    let url = build_tmdb_url(
+        &format!("/tv/{}", tmdb_id),
+        api_key,
+        "language=en-US"
+    );
+
+    let client = build_client()?;
+    let response = tmdb_request(&client, &url, api_key)?;
+
+    if !response.status().is_success() {
+        return Err(format!("Failed to fetch TV show details: HTTP {}", response.status()).into());
+    }
+
+    let details: TvShowDetails = response.json()?;
+    println!("[TMDB] TV show has {} seasons", details.number_of_seasons);
+
+    Ok(details)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TvShowDetails {
+    pub id: i64,
+    pub name: String,
+    pub overview: Option<String>,
+    pub poster_path: Option<String>,
+    pub backdrop_path: Option<String>,
+    pub first_air_date: Option<String>,
+    pub number_of_seasons: i32,
+    pub number_of_episodes: i32,
+    pub seasons: Vec<TvShowSeasonBrief>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TvShowSeasonBrief {
+    pub id: i64,
+    pub season_number: i32,
+    pub name: String,
+    pub episode_count: i32,
+    pub poster_path: Option<String>,
+}
+
+/// Fetch all episodes for a specific season
+pub fn fetch_season_episodes(
+    api_key: &str,
+    tmdb_id: &str,
+    season_number: i32,
+    series_title: &str,
+    image_cache_dir: &str,
+) -> Result<TmdbSeasonInfo, Box<dyn std::error::Error + Send + Sync>> {
+    println!("[TMDB] Fetching season {} episodes for series ID: {}", season_number, tmdb_id);
+
+    let url = build_tmdb_url(
+        &format!("/tv/{}/season/{}", tmdb_id, season_number),
+        api_key,
+        "language=en-US"
+    );
+
+    let client = build_client()?;
+    let response = tmdb_request(&client, &url, api_key)?;
+
+    if !response.status().is_success() {
+        return Err(format!("Failed to fetch season {}: HTTP {}", season_number, response.status()).into());
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SeasonResponse {
+        id: i64,
+        name: String,
+        overview: Option<String>,
+        poster_path: Option<String>,
+        season_number: i32,
+        episodes: Vec<EpisodeResponse>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct EpisodeResponse {
+        id: i64,
+        name: String,
+        overview: Option<String>,
+        still_path: Option<String>,
+        episode_number: i32,
+        season_number: i32,
+        air_date: Option<String>,
+    }
+
+    let season_data: SeasonResponse = response.json()?;
+    println!("[TMDB] Found {} episodes in season {}", season_data.episodes.len(), season_number);
+
+    // Cache season poster if available
+    let season_poster = season_data.poster_path.as_ref().and_then(|path| {
+        cache_image_organized(
+            path,
+            image_cache_dir,
+            series_title,
+            ImageType::SeriesBanner,
+        )
+    });
+
+    // Process episodes and cache their images
+    let episodes: Vec<TmdbEpisodeInfo> = season_data.episodes
+        .into_iter()
+        .map(|ep| {
+            // Cache episode still image
+            let still_path = if let Some(ref path) = ep.still_path {
+                println!("[TMDB] Downloading episode image for S{:02}E{:02}: {}", ep.season_number, ep.episode_number, path);
+                let cached = cache_image_organized(
+                    path,
+                    image_cache_dir,
+                    series_title,
+                    ImageType::EpisodeBanner {
+                        season: ep.season_number,
+                        episode: ep.episode_number,
+                    },
+                );
+                if cached.is_some() {
+                    println!("[TMDB] Successfully cached episode image for S{:02}E{:02}", ep.season_number, ep.episode_number);
+                } else {
+                    println!("[TMDB] Failed to cache episode image for S{:02}E{:02}", ep.season_number, ep.episode_number);
+                }
+                cached
+            } else {
+                println!("[TMDB] No still_path for S{:02}E{:02} (TMDB has no image)", ep.season_number, ep.episode_number);
+                None
+            };
+
+            TmdbEpisodeInfo {
+                episode_number: ep.episode_number,
+                season_number: ep.season_number,
+                name: ep.name,
+                overview: ep.overview,
+                still_path,
+                air_date: ep.air_date,
+            }
+        })
+        .collect();
+
+    Ok(TmdbSeasonInfo {
+        season_number: season_data.season_number,
+        name: season_data.name,
+        overview: season_data.overview,
+        poster_path: season_poster,
+        episode_count: episodes.len() as i32,
+        episodes,
+    })
+}
+
+/// Fetch and cache all episode metadata for a TV series
+pub fn fetch_all_series_episodes(
+    api_key: &str,
+    tmdb_id: &str,
+    series_title: &str,
+    image_cache_dir: &str,
+) -> Result<Vec<TmdbSeasonInfo>, Box<dyn std::error::Error + Send + Sync>> {
+    println!("[TMDB] Fetching all episode metadata for series: {} (ID: {})", series_title, tmdb_id);
+
+    // First get the show details to know how many seasons
+    let show_details = fetch_tv_show_details(api_key, tmdb_id)?;
+
+    let mut all_seasons = Vec::new();
+
+    // Fetch each season (skip season 0 which is usually specials)
+    for season_info in &show_details.seasons {
+        if season_info.season_number == 0 {
+            println!("[TMDB] Skipping specials (season 0)");
+            continue;
+        }
+
+        match fetch_season_episodes(api_key, tmdb_id, season_info.season_number, series_title, image_cache_dir) {
+            Ok(season) => {
+                println!("[TMDB] Fetched {} episodes for season {}", season.episodes.len(), season.season_number);
+                all_seasons.push(season);
+            }
+            Err(e) => {
+                println!("[TMDB] Warning: Failed to fetch season {}: {}", season_info.season_number, e);
+            }
+        }
+
+        // Small delay between season fetches to respect rate limits
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    println!("[TMDB] Fetched {} total seasons with episode data", all_seasons.len());
+    Ok(all_seasons)
+}
+
+/// Fetch metadata and images for only specific episodes (the ones user owns)
+/// owned_episodes is a list of (season_number, episode_number) tuples
+pub fn fetch_owned_episodes_only(
+    api_key: &str,
+    tmdb_id: &str,
+    series_title: &str,
+    image_cache_dir: &str,
+    owned_episodes: &[(i32, i32)],
+) -> Result<Vec<TmdbEpisodeInfo>, Box<dyn std::error::Error + Send + Sync>> {
+    if owned_episodes.is_empty() {
+        println!("[TMDB] No owned episodes to refresh");
+        return Ok(Vec::new());
+    }
+
+    println!("[TMDB] Fetching metadata for {} owned episodes of: {}", owned_episodes.len(), series_title);
+
+    // Group episodes by season for efficient fetching
+    let mut seasons_needed: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    for (season, _) in owned_episodes {
+        seasons_needed.insert(*season);
+    }
+
+    println!("[TMDB] Seasons needed: {:?}", seasons_needed);
+
+    let mut result_episodes = Vec::new();
+    let client = build_client()?;
+
+    for season_num in seasons_needed {
+        println!("[TMDB] Fetching season {} data...", season_num);
+
+        let url = build_tmdb_url(
+            &format!("/tv/{}/season/{}", tmdb_id, season_num),
+            api_key,
+            "language=en-US"
+        );
+
+        let response = match tmdb_request(&client, &url, api_key) {
+            Ok(r) => r,
+            Err(e) => {
+                println!("[TMDB] Failed to fetch season {}: {}", season_num, e);
+                continue;
+            }
+        };
+
+        if !response.status().is_success() {
+            println!("[TMDB] Season {} fetch returned {}", season_num, response.status());
+            continue;
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct SeasonResponse {
+            episodes: Vec<EpisodeResponse>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct EpisodeResponse {
+            name: String,
+            overview: Option<String>,
+            still_path: Option<String>,
+            episode_number: i32,
+            season_number: i32,
+            air_date: Option<String>,
+        }
+
+        let season_data: SeasonResponse = match response.json() {
+            Ok(d) => d,
+            Err(e) => {
+                println!("[TMDB] Failed to parse season {} data: {}", season_num, e);
+                continue;
+            }
+        };
+
+        // Filter to only the episodes user owns in this season
+        let owned_in_season: Vec<i32> = owned_episodes.iter()
+            .filter(|(s, _)| *s == season_num)
+            .map(|(_, e)| *e)
+            .collect();
+
+        println!("[TMDB] User owns episodes {:?} in season {}", owned_in_season, season_num);
+
+        for ep in season_data.episodes {
+            if !owned_in_season.contains(&ep.episode_number) {
+                continue; // Skip episodes user doesn't own
+            }
+
+            println!("[TMDB] Processing owned episode S{:02}E{:02}: {}",
+                ep.season_number, ep.episode_number, ep.name);
+
+            // Download still image only for this episode
+            let still_path = if let Some(ref path) = ep.still_path {
+                println!("[TMDB] Downloading image for S{:02}E{:02}", ep.season_number, ep.episode_number);
+                let cached = cache_image_organized(
+                    path,
+                    image_cache_dir,
+                    series_title,
+                    ImageType::EpisodeBanner {
+                        season: ep.season_number,
+                        episode: ep.episode_number,
+                    },
+                );
+                if cached.is_some() {
+                    println!("[TMDB] Successfully cached S{:02}E{:02} image", ep.season_number, ep.episode_number);
+                } else {
+                    println!("[TMDB] Failed to cache S{:02}E{:02} image", ep.season_number, ep.episode_number);
+                }
+                cached
+            } else {
+                println!("[TMDB] No still_path for S{:02}E{:02} on TMDB", ep.season_number, ep.episode_number);
+                None
+            };
+
+            result_episodes.push(TmdbEpisodeInfo {
+                episode_number: ep.episode_number,
+                season_number: ep.season_number,
+                name: ep.name,
+                overview: ep.overview,
+                still_path,
+                air_date: ep.air_date,
+            });
+        }
+
+        // Small delay between season fetches
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    println!("[TMDB] Successfully processed {} owned episodes", result_episodes.len());
+    Ok(result_episodes)
 }

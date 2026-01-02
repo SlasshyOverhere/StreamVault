@@ -17,6 +17,8 @@ export interface MediaItem {
     progress_percent?: number;
     parent_id?: number;
     tmdb_id?: string;
+    episode_title?: string;
+    still_path?: string;
 }
 
 export interface Config {
@@ -454,6 +456,85 @@ export const getActiveMpvSessions = async (): Promise<MpvSession[]> => {
     }
 };
 
+// ==================== TMDB EPISODE METADATA ====================
+
+// Episode info from TMDB with rich metadata
+export interface TmdbEpisodeInfo {
+    episode_number: number;
+    name: string;
+    overview?: string;
+    still_path?: string;
+    air_date?: string;
+    runtime?: number;
+    vote_average?: number;
+}
+
+// Season details with episodes from TMDB
+export interface TmdbSeasonDetails {
+    season_number: number;
+    name: string;
+    episodes: TmdbEpisodeInfo[];
+}
+
+// TV show details with seasons from TMDB
+export interface TmdbShowDetails {
+    id: number;
+    name: string;
+    poster_path?: string;
+    backdrop_path?: string;
+    overview?: string;
+    number_of_seasons: number;
+    seasons: {
+        season_number: number;
+        name: string;
+        episode_count: number;
+        overview?: string;
+        poster_path?: string;
+        air_date?: string;
+    }[];
+}
+
+// Get TV show details including seasons from TMDB
+export const getTvDetails = async (tvId: number): Promise<TmdbShowDetails | null> => {
+    try {
+        const details = await invoke<TmdbShowDetails>('get_tv_details', { tvId });
+        return details;
+    } catch (error) {
+        console.error('Failed to get TV details:', error);
+        return null;
+    }
+};
+
+// Get episodes for a specific season from TMDB (with full metadata)
+export const getTvSeasonEpisodes = async (tvId: number, seasonNumber: number): Promise<TmdbSeasonDetails | null> => {
+    try {
+        const seasonDetails = await invoke<TmdbSeasonDetails>('get_tv_season_episodes', { tvId, seasonNumber });
+        return seasonDetails;
+    } catch (error) {
+        console.error('Failed to get season episodes:', error);
+        return null;
+    }
+};
+
+// Force refresh episode metadata for a TV series (re-downloads images)
+export const refreshSeriesMetadata = async (tvId: number, seriesTitle: string): Promise<string> => {
+    try {
+        const result = await invoke<string>('refresh_series_metadata', { tvId, seriesTitle });
+        return result;
+    } catch (error) {
+        console.error('Failed to refresh series metadata:', error);
+        throw error;
+    }
+};
+
+// TMDB image URL helper
+const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p';
+
+export const getTmdbImageUrl = (path: string | undefined, size: 'w92' | 'w185' | 'w300' | 'w500' | 'original' = 'w300'): string | null => {
+    if (!path) return null;
+    return `${TMDB_IMAGE_BASE}/${size}${path}`;
+};
+
 // Videasy streaming URL helpers
 const VIDEASY_BASE_URL = 'https://player.videasy.net';
 const SLASSHY_COLOR = '8B5CF6'; // Slasshy brand purple
@@ -525,4 +606,32 @@ export function getVideasyUrlForItem(item: MediaItem, parentTmdbId?: string): st
 
     return null;
 }
+
+// ==================== VIDEASY WEBVIEW PLAYER ====================
+
+// Open Videasy in an in-app webview window with progress sync
+export const openVideasyPlayer = async (
+    url: string,
+    tmdbId: string,
+    mediaType: 'movie' | 'tv',
+    title: string,
+    posterPath?: string,
+    season?: number,
+    episode?: number
+): Promise<void> => {
+    try {
+        await invoke('open_videasy_player', {
+            url,
+            tmdbId,
+            mediaType,
+            title,
+            posterPath: posterPath || null,
+            season: season || null,
+            episode: episode || null,
+        });
+    } catch (error) {
+        console.error('Failed to open Videasy player:', error);
+        throw error;
+    }
+};
 

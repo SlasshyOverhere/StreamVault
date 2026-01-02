@@ -1,7 +1,10 @@
 use regex::Regex;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use walkdir::WalkDir;
 use serde::Serialize;
+use rayon::prelude::*;
 
 use crate::config::Config;
 use crate::database::Database;
@@ -110,28 +113,25 @@ fn cleanup_orphaned_media(db: &Database, image_cache_dir: &str) {
             }
         }
     }
-    
+
     // Now clean up orphaned images (images not referenced by any media)
     if let Ok(used_posters) = db.get_all_poster_paths() {
         let used_set: std::collections::HashSet<String> = used_posters.into_iter().collect();
-        
-        // Read all files in image cache directory
-        if let Ok(entries) = std::fs::read_dir(image_cache_dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let file_name = entry.file_name().to_string_lossy().to_string();
-                let poster_path = format!("image_cache/{}", file_name);
-                
-                // If this image is not in use by any media, delete it
-                if !used_set.contains(&poster_path) {
-                    println!("[CLEANUP] Removing orphaned image: {}", file_name);
-                    if let Err(e) = std::fs::remove_file(entry.path()) {
-                        println!("[CLEANUP] Error removing image: {}", e);
-                    }
+
+        // Also get still paths from episodes
+        let mut all_used_paths = used_set.clone();
+        if let Ok(all_media) = db.get_all_media() {
+            for item in all_media {
+                if let Some(still) = item.still_path {
+                    all_used_paths.insert(still);
                 }
             }
         }
+
+        // Read all entries in image cache directory (files and subdirectories)
+        cleanup_image_directory(image_cache_dir, &all_used_paths, "");
     }
-    
+
     if removed_count > 0 {
         println!("[CLEANUP] Removed {} orphaned entries", removed_count);
     } else {
@@ -139,112 +139,210 @@ fn cleanup_orphaned_media(db: &Database, image_cache_dir: &str) {
     }
 }
 
-// New function with event emissions
+/// Recursively clean up orphaned images from image cache directory
+fn cleanup_image_directory(
+    base_dir: &str,
+    used_paths: &std::collections::HashSet<String>,
+    sub_path: &str,
+) {
+    let full_path = if sub_path.is_empty() {
+        Path::new(base_dir).to_path_buf()
+    } else {
+        Path::new(base_dir).join(sub_path)
+    };
+
+    if let Ok(entries) = std::fs::read_dir(&full_path) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let file_type = entry.file_type();
+            let entry_name = entry.file_name().to_string_lossy().to_string();
+
+            if let Ok(ft) = file_type {
+                if ft.is_dir() {
+                    // Recursively clean subdirectory
+                    let new_sub_path = if sub_path.is_empty() {
+                        entry_name.clone()
+                    } else {
+                        format!("{}/{}", sub_path, entry_name)
+                    };
+                    cleanup_image_directory(base_dir, used_paths, &new_sub_path);
+
+                    // If directory is now empty, remove it
+                    if let Ok(mut entries) = std::fs::read_dir(entry.path()) {
+                        if entries.next().is_none() {
+                            println!("[CLEANUP] Removing empty directory: {}", entry_name);
+                            let _ = std::fs::remove_dir(entry.path());
+                        }
+                    }
+                } else if ft.is_file() {
+                    // Build the path as stored in database
+                    let db_path = if sub_path.is_empty() {
+                        format!("image_cache/{}", entry_name)
+                    } else {
+                        format!("image_cache/{}/{}", sub_path, entry_name)
+                    };
+
+                    // If this image is not in use by any media, delete it
+                    if !used_paths.contains(&db_path) {
+                        println!("[CLEANUP] Removing orphaned image: {}", db_path);
+                        if let Err(e) = std::fs::remove_file(entry.path()) {
+                            println!("[CLEANUP] Error removing image: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Optimized function with parallel file discovery and batched processing
 pub fn scan_media_folders_with_events(
-    db: &Database, 
-    config: &Config, 
-    image_cache_dir: &str, 
+    db: &Database,
+    config: &Config,
+    image_cache_dir: &str,
     window: &tauri::Window
 ) {
-    println!("[SCAN] Starting media scan with events...");
-    
+    println!("[SCAN] Starting optimized media scan with parallel processing...");
+
     // First, cleanup orphaned media entries
     cleanup_orphaned_media(db, image_cache_dir);
-    
+
     let api_key = config.tmdb_api_key.clone().unwrap_or_default();
     if api_key.is_empty() {
         println!("[SCAN] WARNING: TMDB API Key is empty! Metadata/posters will not be fetched.");
     } else {
         println!("[SCAN] TMDB API Key is configured.");
     }
-    
-    // First, count total files to scan
-    let mut total_files = 0;
-    for folder in &config.media_folders {
-        if !Path::new(folder).exists() {
-            continue;
-        }
-        for entry in WalkDir::new(folder)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
-            let extension = entry.path().extension()
-                .and_then(|e| e.to_str())
-                .map(|e| format!(".{}", e.to_lowercase()))
-                .unwrap_or_default();
-            if VIDEO_EXTENSIONS.contains(&extension.as_str()) {
-                total_files += 1;
-            }
-        }
-    }
-    
-    println!("[SCAN] Found {} video files to process", total_files);
-    
-    let mut current = 0;
-    
+
+    // Phase 1: Parallel file discovery - collect all video files first
+    println!("[SCAN] Phase 1: Discovering video files...");
+    let start_discovery = std::time::Instant::now();
+
+    let mut all_video_files: Vec<PathBuf> = Vec::new();
+
     for folder in &config.media_folders {
         if !Path::new(folder).exists() {
             println!("[SCAN] Folder does not exist: {}", folder);
             continue;
         }
-        
-        println!("[SCAN] Scanning folder: {}", folder);
-        
-        for entry in WalkDir::new(folder)
+
+        // Collect files in parallel using rayon
+        let folder_files: Vec<PathBuf> = WalkDir::new(folder)
             .into_iter()
+            .par_bridge() // Use parallel iterator
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
-        {
-            let path = entry.path();
-            let extension = path.extension()
-                .and_then(|e| e.to_str())
-                .map(|e| format!(".{}", e.to_lowercase()))
-                .unwrap_or_default();
-            
-            if !VIDEO_EXTENSIONS.contains(&extension.as_str()) {
-                continue;
-            }
-            
-            current += 1;
-            let file_path = path.to_string_lossy().to_string();
-            
-            // Skip if already indexed
-            if db.media_exists(&file_path).unwrap_or(false) {
-                println!("[SCAN] Already indexed: {}", file_path);
-                continue;
-            }
-            
-            // Parse filename
+            .filter(|e| {
+                e.path().extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| VIDEO_EXTENSIONS.contains(&format!(".{}", ext.to_lowercase()).as_str()))
+                    .unwrap_or(false)
+            })
+            .map(|e| e.path().to_path_buf())
+            .collect();
+
+        all_video_files.extend(folder_files);
+    }
+
+    let discovery_time = start_discovery.elapsed();
+    println!("[SCAN] Discovered {} video files in {:?}", all_video_files.len(), discovery_time);
+
+    let total_files = all_video_files.len();
+    if total_files == 0 {
+        println!("[SCAN] No new files to process");
+        return;
+    }
+
+    // Phase 2: Filter out already indexed files (parallel check)
+    println!("[SCAN] Phase 2: Checking for already indexed files...");
+    let start_filter = std::time::Instant::now();
+
+    // Get all existing file paths from DB (single query is faster than individual checks)
+    let existing_paths: std::collections::HashSet<String> = db.get_all_file_paths()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+
+    let new_files: Vec<PathBuf> = all_video_files
+        .into_par_iter()
+        .filter(|path| {
+            let path_str = path.to_string_lossy().to_string();
+            !existing_paths.contains(&path_str)
+        })
+        .collect();
+
+    let filter_time = start_filter.elapsed();
+    println!("[SCAN] {} new files to process (filtered in {:?})", new_files.len(), filter_time);
+
+    if new_files.is_empty() {
+        println!("[SCAN] All files already indexed");
+        return;
+    }
+
+    // Phase 3: Parse filenames in parallel
+    println!("[SCAN] Phase 3: Parsing filenames...");
+    let start_parse = std::time::Instant::now();
+
+    let parsed_files: Vec<(PathBuf, ParsedMedia)> = new_files
+        .par_iter()
+        .filter_map(|path| {
             let parsed = parse_filename(path);
             if parsed.title.is_empty() {
-                println!("[SCAN] Could not parse: {}", file_path);
-                continue;
+                None
+            } else {
+                Some((path.clone(), parsed))
             }
-            
-            println!("[SCAN] Processing {}/{}: {} - Type: {:?}", current, total_files, parsed.title, parsed.media_type);
-            
+        })
+        .collect();
+
+    let parse_time = start_parse.elapsed();
+    println!("[SCAN] Parsed {} files in {:?}", parsed_files.len(), parse_time);
+
+    // Phase 4: Process files (TMDB lookups - sequential to respect rate limits)
+    println!("[SCAN] Phase 4: Fetching metadata and indexing...");
+    let start_process = std::time::Instant::now();
+
+    let total_to_process = parsed_files.len();
+    let processed_count = Arc::new(AtomicUsize::new(0));
+
+    // Process in batches for better TMDB rate limit handling
+    const BATCH_SIZE: usize = 10;
+
+    for batch in parsed_files.chunks(BATCH_SIZE) {
+        // Process batch items (can be parallel for parsing, sequential for TMDB)
+        for (path, parsed) in batch {
+            let file_path = path.to_string_lossy().to_string();
+            let current = processed_count.fetch_add(1, Ordering::SeqCst) + 1;
+
             // Emit progress event
             let _ = window.emit("scan-progress", ScanProgressPayload {
                 title: parsed.title.clone(),
                 media_type: if parsed.media_type == MediaParseType::Movie { "movie" } else { "tv" }.to_string(),
                 current,
-                total: total_files,
+                total: total_to_process,
             });
-            
+
             // Get duration (skip for now, would need ffprobe or similar)
             let duration = 0.0;
-            
+
             // Process based on type
             if parsed.media_type == MediaParseType::TvEpisode {
-                process_tv_episode(db, &file_path, &parsed, &api_key, image_cache_dir, duration);
+                process_tv_episode(db, &file_path, parsed, &api_key, image_cache_dir, duration);
             } else {
-                process_movie(db, &file_path, &parsed, &api_key, image_cache_dir, duration);
+                process_movie(db, &file_path, parsed, &api_key, image_cache_dir, duration);
             }
         }
+
+        // Small delay between batches to avoid TMDB rate limits
+        if !api_key.is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
-    
-    println!("[SCAN] Media scan complete. Processed {} files.", current);
+
+    let process_time = start_process.elapsed();
+    println!("[SCAN] Processed {} files in {:?}", total_to_process, process_time);
+
+    let total_time = discovery_time + filter_time + parse_time + process_time;
+    println!("[SCAN] Media scan complete. Total time: {:?}", total_time);
 }
 
 // Keep the original function for backward compatibility
@@ -365,7 +463,7 @@ pub fn process_tv_episode(
     // This ensures episodes group together even if TMDB search is inconsistent
     let existing_series = db.find_series_by_tmdb_or_title(None, &parsed.title, parsed.year);
 
-    let (series_title, series_year, series_overview, series_poster_path, series_tmdb_id, series_id) =
+    let (series_title, series_year, series_overview, series_poster_path, series_tmdb_id, series_id, _is_new_series) =
         if let Ok(Some(existing_id)) = existing_series {
             // Found existing series - use its data
             println!("[TV] Found existing series by title match (ID: {})", existing_id);
@@ -376,10 +474,11 @@ pub fn process_tv_episode(
                     existing.overview.clone(),
                     existing.poster_path.clone(),
                     existing.tmdb_id.clone(),
-                    Some(existing_id)
+                    Some(existing_id),
+                    false
                 )
             } else {
-                (parsed.title.clone(), parsed.year, None, None, None, Some(existing_id))
+                (parsed.title.clone(), parsed.year, None, None, None, Some(existing_id), false)
             }
         } else {
             // No existing series - search TMDB
@@ -397,15 +496,21 @@ pub fn process_tv_episode(
                     parsed.year,
                     image_cache_dir,
                 ) {
-                    title = metadata.title;
+                    title = metadata.title.clone();
                     year = metadata.year;
                     overview = metadata.overview;
-                    poster_path = metadata.poster_path;
                     tmdb_id = metadata.tmdb_id;
+
+                    // Use organized image caching for series poster
+                    if let Some(ref poster) = metadata.poster_path {
+                        // Extract the TMDB path from the cached path if it exists
+                        // or cache with organized structure
+                        poster_path = Some(poster.clone());
+                    }
                 }
             }
 
-            (title, year, overview, poster_path, tmdb_id, None)
+            (title, year, overview, poster_path, tmdb_id, None, true)
         };
 
     // Now get or create the series
@@ -473,14 +578,157 @@ pub fn process_tv_episode(
         }
     };
 
-    // Insert episode
+    // Get episode info
     let season = parsed.season.unwrap_or(1);
     let episode = parsed.episode.unwrap_or(1);
     let ep_title = format!("S{:02}E{:02}", season, episode);
 
-    match db.insert_episode(&ep_title, file_path, final_series_id, season, episode, duration) {
+    // Fetch episode metadata directly from TMDB for THIS specific episode
+    let (episode_title, episode_overview, episode_still) = if let Some(ref tmdb_id) = series_tmdb_id {
+        // First check if we have cached metadata
+        let cached_data = db.get_cached_episode_metadata(tmdb_id, season, episode).ok().flatten();
+
+        // Check if cached still_path file actually exists on disk
+        let cache_valid = if let Some(ref cached) = cached_data {
+            if let Some(ref still_path) = cached.still_path {
+                // Remove image_cache/ prefix if present for checking
+                let clean_path = still_path.replace("image_cache/", "");
+                let full_path = Path::new(image_cache_dir).join(&clean_path);
+                let exists = full_path.exists();
+                if !exists {
+                    println!("[TV] Cached still_path doesn't exist on disk: {:?}", full_path);
+                }
+                exists
+            } else {
+                // No still_path in cache - need to fetch
+                false
+            }
+        } else {
+            false
+        };
+
+        if cache_valid {
+            let cached = cached_data.unwrap();
+            println!("[TV] Using cached metadata for {} S{:02}E{:02}", series_title, season, episode);
+            (cached.episode_title, cached.overview, cached.still_path)
+        } else {
+            // No valid cache - fetch this specific episode from TMDB
+            if !api_key.is_empty() {
+                println!("[TV] Fetching episode metadata from TMDB for {} S{:02}E{:02}", series_title, season, episode);
+                match fetch_single_episode_metadata(api_key, tmdb_id, season, episode, &series_title, image_cache_dir) {
+                    Ok(Some(ep_info)) => {
+                        // Cache it for future use
+                        let _ = db.save_cached_episode_metadata(
+                            tmdb_id,
+                            season,
+                            episode,
+                            Some(&ep_info.name),
+                            ep_info.overview.as_deref(),
+                            ep_info.still_path.as_deref(),
+                            ep_info.air_date.as_deref(),
+                        );
+                        (Some(ep_info.name), ep_info.overview, ep_info.still_path)
+                    }
+                    Ok(None) => {
+                        println!("[TV] No TMDB metadata found for {} S{:02}E{:02}", series_title, season, episode);
+                        (None, None, None)
+                    }
+                    Err(e) => {
+                        println!("[TV] Failed to fetch episode metadata: {}", e);
+                        (None, None, None)
+                    }
+                }
+            } else {
+                (None, None, None)
+            }
+        }
+    } else {
+        (None, None, None)
+    };
+
+    match db.insert_episode_with_metadata(
+        &ep_title,
+        file_path,
+        final_series_id,
+        season,
+        episode,
+        duration,
+        episode_title.as_deref(),
+        episode_overview.as_deref(),
+        episode_still.as_deref(),
+    ) {
         Ok(_) => println!("[TV] Indexed Episode: {} - {} (series_id: {})", series_title, ep_title, final_series_id),
         Err(e) => println!("[TV] Error indexing episode {}: {}", ep_title, e),
+    }
+}
+
+/// Fetch metadata for a single episode from TMDB
+fn fetch_single_episode_metadata(
+    api_key: &str,
+    tmdb_id: &str,
+    season: i32,
+    episode: i32,
+    series_title: &str,
+    image_cache_dir: &str,
+) -> Result<Option<tmdb::TmdbEpisodeInfo>, Box<dyn std::error::Error + Send + Sync>> {
+    // Use the existing tmdb function but we only need one episode
+    // For efficiency, we fetch the whole season and pick the episode we need
+    // This is cached anyway so subsequent episodes in the same season will be fast
+
+    let season_info = tmdb::fetch_season_episodes(api_key, tmdb_id, season, series_title, image_cache_dir)?;
+
+    // Find our specific episode
+    for ep in season_info.episodes {
+        if ep.episode_number == episode {
+            return Ok(Some(ep));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Pre-fetch and cache all episode metadata for a TV series (legacy - kept for manual refresh)
+fn prefetch_series_episodes(
+    db: &Database,
+    api_key: &str,
+    tmdb_id: &str,
+    series_title: &str,
+    image_cache_dir: &str,
+) {
+    println!("[TV] Pre-fetching episode metadata for series: {} (TMDB ID: {})", series_title, tmdb_id);
+
+    // Check if we already have cached metadata for this series
+    if let Ok(true) = db.has_cached_metadata_for_series(tmdb_id) {
+        println!("[TV] Episode metadata already cached for series {}", tmdb_id);
+        return;
+    }
+
+    // Fetch all episodes from TMDB
+    match tmdb::fetch_all_series_episodes(api_key, tmdb_id, series_title, image_cache_dir) {
+        Ok(seasons) => {
+            let mut total_cached = 0;
+            for season in seasons {
+                for ep in season.episodes {
+                    if let Err(e) = db.save_cached_episode_metadata(
+                        tmdb_id,
+                        ep.season_number,
+                        ep.episode_number,
+                        Some(&ep.name),
+                        ep.overview.as_deref(),
+                        ep.still_path.as_deref(),
+                        ep.air_date.as_deref(),
+                    ) {
+                        println!("[TV] Warning: Failed to cache episode S{:02}E{:02}: {}", ep.season_number, ep.episode_number, e);
+                    } else {
+                        total_cached += 1;
+                    }
+                }
+            }
+            println!("[TV] Cached metadata for {} episodes of {}", total_cached, series_title);
+        }
+        Err(e) => {
+            println!("[TV] Warning: Failed to pre-fetch episode metadata: {}", e);
+        }
     }
 }
 

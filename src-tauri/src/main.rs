@@ -835,7 +835,94 @@ async fn get_video_file_size(file_path: String) -> Result<u64, String> {
     Ok(metadata.len())
 }
 
-// Helper function to perform HTTP GET with retry logic
+/// Check if the given credential is an access token (starts with "eyJ") or API key
+fn is_access_token(credential: &str) -> bool {
+    credential.starts_with("eyJ")
+}
+
+/// Build TMDB URL with proper authentication
+/// - For API keys: adds ?api_key=XXX to URL
+/// - For access tokens: returns URL without api_key (auth goes in header)
+fn build_tmdb_api_url(path: &str, credential: &str, extra_params: &str) -> String {
+    let base = "https://api.themoviedb.org/3";
+    if is_access_token(credential) {
+        if extra_params.is_empty() {
+            format!("{}{}", base, path)
+        } else {
+            format!("{}{}?{}", base, path, extra_params)
+        }
+    } else {
+        if extra_params.is_empty() {
+            format!("{}{}?api_key={}", base, path, credential)
+        } else {
+            format!("{}{}?api_key={}&{}", base, path, credential, extra_params)
+        }
+    }
+}
+
+// Helper function to perform HTTP GET with retry logic and optional Bearer auth
+// Configured to handle Windows connection issues (error 10054 - connection reset)
+fn http_get_with_retry_auth(url: &str, credential: &str, max_retries: u32) -> Result<reqwest::blocking::Response, String> {
+    let mut last_error = String::new();
+    let use_bearer = is_access_token(credential);
+
+    for attempt in 0..max_retries {
+        if attempt > 0 {
+            // Exponential backoff: 1000ms, 2000ms, 4000ms...
+            let delay_ms = 1000 * (1 << attempt);
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms as u64));
+            println!("[HTTP] Retry attempt {} after {}ms delay", attempt + 1, delay_ms);
+        }
+
+        // Create a fresh client for each attempt to avoid stale connection issues
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .pool_max_idle_per_host(0)
+            .tcp_keepalive(std::time::Duration::from_secs(20))
+            .http1_only()
+            .tcp_nodelay(true)
+            .user_agent("SlasshyMediaIndexer/1.0")
+            .build() {
+                Ok(c) => c,
+                Err(e) => {
+                    last_error = format!("Failed to build HTTP client: {}", e);
+                    println!("[HTTP] Client build failed (attempt {}): {}", attempt + 1, last_error);
+                    continue;
+                }
+            };
+
+        let request = if use_bearer {
+            client.get(url).header("Authorization", format!("Bearer {}", credential))
+        } else {
+            client.get(url)
+        };
+
+        match request.send() {
+            Ok(response) => {
+                if response.status().is_success() {
+                    return Ok(response);
+                } else {
+                    last_error = format!("TMDB API error: {}", response.status());
+                    // Don't retry on client errors (4xx)
+                    if response.status().is_client_error() {
+                        return Err(last_error);
+                    }
+                    println!("[HTTP] Server error (attempt {}): {}", attempt + 1, last_error);
+                }
+            }
+            Err(e) => {
+                last_error = format!("Network error: {}", e);
+                println!("[HTTP] Request failed (attempt {}): {}", attempt + 1, last_error);
+                // Continue to retry on network errors
+            }
+        }
+    }
+
+    Err(format!("Failed after {} retries: {}", max_retries, last_error))
+}
+
+// Helper function to perform HTTP GET with retry logic (legacy, no auth header)
 // Configured to handle Windows connection issues (error 10054 - connection reset)
 fn http_get_with_retry(url: &str, max_retries: u32) -> Result<reqwest::blocking::Response, String> {
     let mut last_error = String::new();
@@ -963,22 +1050,19 @@ async fn get_tv_details(
     state: State<'_, AppState>,
     tv_id: i64,
 ) -> Result<TvShowDetails, String> {
-    let api_key = {
+    let credential = {
         let config = state.config.lock().map_err(|e| e.to_string())?;
         config.tmdb_api_key.clone().unwrap_or_default()
     };
-    
-    if api_key.is_empty() {
-        return Err("TMDB API key not configured".to_string());
+
+    if credential.is_empty() {
+        return Err("TMDB API key/token not configured".to_string());
     }
-    
-    let url = format!(
-        "https://api.themoviedb.org/3/tv/{}?api_key={}",
-        tv_id, api_key
-    );
-    
+
+    let url = build_tmdb_api_url(&format!("/tv/{}", tv_id), &credential, "");
+
     let result = tokio::task::spawn_blocking(move || -> Result<TvShowDetails, String> {
-        let response = http_get_with_retry(&url, 3)?;
+        let response = http_get_with_retry_auth(&url, &credential, 3)?;
         
         #[derive(serde::Deserialize)]
         struct RawSeason {
@@ -1037,22 +1121,64 @@ async fn get_tv_season_episodes(
     tv_id: i64,
     season_number: i32,
 ) -> Result<TvSeasonDetails, String> {
-    let api_key = {
+    // First, try to get from local cache
+    let tv_id_str = tv_id.to_string();
+    let image_cache_dir = database::get_image_cache_dir();
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        if let Ok(cached_episodes) = db.get_cached_episodes_for_season(&tv_id_str, season_number) {
+            if !cached_episodes.is_empty() {
+                println!("[CACHE] Using cached episode data for TV {} Season {}", tv_id, season_number);
+                let episodes: Vec<TvEpisodeInfo> = cached_episodes
+                    .into_iter()
+                    .map(|e| {
+                        // Verify still_path file actually exists
+                        let verified_still_path = e.still_path.and_then(|path| {
+                            let full_path = std::path::Path::new(&image_cache_dir).join(&path);
+                            if full_path.exists() {
+                                Some(path)
+                            } else {
+                                None // File doesn't exist, return None
+                            }
+                        });
+
+                        TvEpisodeInfo {
+                            episode_number: e.episode_number,
+                            name: e.episode_title.unwrap_or_else(|| format!("Episode {}", e.episode_number)),
+                            overview: e.overview,
+                            still_path: verified_still_path,
+                            air_date: e.air_date,
+                            runtime: None,
+                            vote_average: None,
+                        }
+                    })
+                    .collect();
+
+                return Ok(TvSeasonDetails {
+                    season_number,
+                    name: format!("Season {}", season_number),
+                    episodes,
+                });
+            }
+        }
+    }
+
+    // Cache miss - fetch from TMDB API
+    println!("[TMDB] Cache miss, fetching from API for TV {} Season {}", tv_id, season_number);
+
+    let credential = {
         let config = state.config.lock().map_err(|e| e.to_string())?;
         config.tmdb_api_key.clone().unwrap_or_default()
     };
-    
-    if api_key.is_empty() {
-        return Err("TMDB API key not configured".to_string());
+
+    if credential.is_empty() {
+        return Err("TMDB API key/token not configured".to_string());
     }
-    
-    let url = format!(
-        "https://api.themoviedb.org/3/tv/{}/season/{}?api_key={}",
-        tv_id, season_number, api_key
-    );
-    
+
+    let url = build_tmdb_api_url(&format!("/tv/{}/season/{}", tv_id, season_number), &credential, "");
+
     let result = tokio::task::spawn_blocking(move || -> Result<TvSeasonDetails, String> {
-        let response = http_get_with_retry(&url, 3)?;
+        let response = http_get_with_retry_auth(&url, &credential, 3)?;
         
         #[derive(serde::Deserialize)]
         struct RawEpisode {
@@ -1093,7 +1219,121 @@ async fn get_tv_season_episodes(
             episodes,
         })
     }).await.map_err(|e| e.to_string())??;
-    
+
+    Ok(result)
+}
+
+// Force refresh episode metadata for a TV series (re-downloads images ONLY for owned episodes)
+#[tauri::command]
+async fn refresh_series_metadata(
+    state: State<'_, AppState>,
+    tv_id: i64,
+    series_title: String,
+) -> Result<String, String> {
+    let credential = {
+        let config = state.config.lock().map_err(|e| e.to_string())?;
+        config.tmdb_api_key.clone().unwrap_or_default()
+    };
+
+    if credential.is_empty() {
+        return Err("TMDB API key/token not configured".to_string());
+    }
+
+    let image_cache_dir = database::get_image_cache_dir();
+    let tv_id_str = tv_id.to_string();
+    let series_title_clone = series_title.clone();
+
+    println!("[REFRESH] Starting metadata refresh for {} (TMDB ID: {})", series_title, tv_id);
+    println!("[REFRESH] Image cache directory: {}", image_cache_dir);
+
+    // Step 1: Find the series ID in our database by TMDB ID
+    let (series_db_id, owned_episodes): (Option<i64>, Vec<(i64, i32, i32)>) = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let series_id = db.find_series_id_by_tmdb(&tv_id_str).map_err(|e| e.to_string())?;
+
+        if let Some(sid) = series_id {
+            let episodes = db.get_owned_episodes_for_series(sid).map_err(|e| e.to_string())?;
+            println!("[REFRESH] Found series DB ID: {}, owned episodes: {}", sid, episodes.len());
+            (Some(sid), episodes)
+        } else {
+            println!("[REFRESH] Warning: Series not found in database by TMDB ID {}", tv_id);
+            (None, Vec::new())
+        }
+    };
+
+    if owned_episodes.is_empty() {
+        return Err("No episodes found for this series in your library".to_string());
+    }
+
+    // Convert to (season, episode) tuples for the TMDB function
+    let episode_list: Vec<(i32, i32)> = owned_episodes.iter()
+        .map(|(_, season, episode)| (*season, *episode))
+        .collect();
+
+    println!("[REFRESH] Will only fetch metadata for {} owned episodes: {:?}",
+        episode_list.len(), episode_list);
+
+    // Clear old cached metadata for just the episodes we own
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        // Only clear metadata for this series
+        if let Ok(deleted) = db.clear_cached_metadata_for_series(&tv_id_str) {
+            println!("[REFRESH] Cleared {} old cached entries for series {}", deleted, tv_id);
+        }
+    }
+
+    // Step 2: Fetch ONLY the episodes the user owns
+    let fetched_episodes = tokio::task::spawn_blocking(move || {
+        tmdb::fetch_owned_episodes_only(&credential, &tv_id_str, &series_title_clone, &image_cache_dir, &episode_list)
+    }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+
+    let mut total_images = 0;
+
+    // Step 3: Save to cached_episode_metadata table AND update the media table directly
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        for ep in &fetched_episodes {
+            if ep.still_path.is_some() {
+                total_images += 1;
+            }
+
+            // Save to cache table
+            if let Err(e) = db.save_cached_episode_metadata(
+                &tv_id.to_string(),
+                ep.season_number,
+                ep.episode_number,
+                Some(&ep.name),
+                ep.overview.as_deref(),
+                ep.still_path.as_deref(),
+                ep.air_date.as_deref(),
+            ) {
+                println!("[REFRESH] Warning: Failed to save cached metadata S{:02}E{:02}: {}",
+                    ep.season_number, ep.episode_number, e);
+            }
+
+            // Also update the media table directly so episodes show the images immediately
+            // Find the episode ID from our owned_episodes list
+            if let Some((episode_db_id, _, _)) = owned_episodes.iter()
+                .find(|(_, s, e)| *s == ep.season_number && *e == ep.episode_number)
+            {
+                if let Err(e) = db.update_episode_metadata(
+                    *episode_db_id,
+                    Some(&ep.name),
+                    ep.overview.as_deref(),
+                    ep.still_path.as_deref(),
+                ) {
+                    println!("[REFRESH] Warning: Failed to update media S{:02}E{:02}: {}",
+                        ep.season_number, ep.episode_number, e);
+                } else {
+                    println!("[REFRESH] Updated media entry for S{:02}E{:02}",
+                        ep.season_number, ep.episode_number);
+                }
+            }
+        }
+    }
+
+    let result = format!("Refreshed {} episodes, {} images downloaded", fetched_episodes.len(), total_images);
+    println!("[REFRESH] Completed: {}", result);
     Ok(result)
 }
 
@@ -1104,32 +1344,30 @@ async fn search_tmdb(
     query: String,
 ) -> Result<TmdbSearchResponse, String> {
     println!("[SEARCH_TMDB] Starting search for: {}", query);
-    
-    let api_key = {
+
+    let credential = {
         let config = state.config.lock().map_err(|e| {
             println!("[SEARCH_TMDB] Failed to lock config: {}", e);
             e.to_string()
         })?;
         let key = config.tmdb_api_key.clone().unwrap_or_default();
-        println!("[SEARCH_TMDB] API key length: {}", key.len());
+        println!("[SEARCH_TMDB] Credential length: {} (is_token: {})", key.len(), is_access_token(&key));
         key
     };
-    
-    if api_key.is_empty() {
-        println!("[SEARCH_TMDB] API key is empty!");
-        return Err("TMDB API key not configured".to_string());
+
+    if credential.is_empty() {
+        println!("[SEARCH_TMDB] API key/token is empty!");
+        return Err("TMDB API key/token not configured".to_string());
     }
-    
-    println!("[SEARCH_TMDB] API key found, building URL...");
-    let url = format!(
-        "https://api.themoviedb.org/3/search/multi?api_key={}&query={}&include_adult=false",
-        api_key,
-        percent_encoding::utf8_percent_encode(&query, percent_encoding::NON_ALPHANUMERIC)
-    );
-    
+
+    let encoded_query = percent_encoding::utf8_percent_encode(&query, percent_encoding::NON_ALPHANUMERIC).to_string();
+    let url = build_tmdb_api_url("/search/multi", &credential, &format!("query={}&include_adult=false", encoded_query));
+
+    println!("[SEARCH_TMDB] URL built, making request...");
+
     // Run blocking HTTP request with retry in a separate thread
     let result = tokio::task::spawn_blocking(move || -> Result<TmdbSearchResponse, String> {
-        let response = http_get_with_retry(&url, 3)?;
+        let response = http_get_with_retry_auth(&url, &credential, 3)?;
         
         #[derive(serde::Deserialize)]
         struct RawSearchResult {
@@ -1182,6 +1420,387 @@ async fn search_tmdb(
     }).await.map_err(|e| e.to_string())??;
     
     Ok(result)
+}
+
+// Videasy localStorage progress format
+#[derive(serde::Deserialize, serde::Serialize, Debug)]
+struct VideasyProgress {
+    duration: f64,
+    watched: f64,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct VideasyStorageItem {
+    poster: Option<String>,
+    background: Option<String>,
+    id: i64,
+    media_type: String,
+    title: String,
+    progress: Option<VideasyProgress>,
+}
+
+// Open Videasy in a webview window with progress sync
+#[tauri::command]
+async fn open_videasy_player(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+    tmdb_id: String,
+    media_type: String,
+    title: String,
+    poster_path: Option<String>,
+    season: Option<i32>,
+    episode: Option<i32>,
+) -> Result<ApiResponse, String> {
+    use tauri::Manager;
+
+    println!("[VIDEASY] Opening player for: {} (tmdb_id: {})", title, tmdb_id);
+
+    // Get saved progress from database
+    let saved_progress = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.get_streaming_resume_info(&tmdb_id, &media_type, season, episode)
+            .map_err(|e| e.to_string())?
+    };
+
+    // Build the storage key for Videasy localStorage
+    let storage_key = if media_type == "movie" {
+        format!("movie-{}", tmdb_id)
+    } else {
+        format!("tv-{}-{}-{}", tmdb_id, season.unwrap_or(1), episode.unwrap_or(1))
+    };
+
+    // Build the injection script for saved progress
+    let inject_script = if let Some(progress) = saved_progress {
+        let storage_item = VideasyStorageItem {
+            poster: poster_path.clone().map(|p| format!("https://image.tmdb.org/t/p/w300{}", p)),
+            background: None,
+            id: tmdb_id.parse().unwrap_or(0),
+            media_type: media_type.clone(),
+            title: title.clone(),
+            progress: Some(VideasyProgress {
+                duration: progress.duration_seconds,
+                watched: progress.resume_position_seconds,
+            }),
+        };
+
+        let json = serde_json::to_string(&storage_item).unwrap_or_default();
+        format!(
+            r#"
+            (function() {{
+                try {{
+                    console.log('[Slasshy] Injecting saved progress for {}');
+                    localStorage.setItem('{}', '{}');
+                    console.log('[Slasshy] Progress injected successfully');
+                }} catch (e) {{
+                    console.error('[Slasshy] Failed to inject progress:', e);
+                }}
+            }})();
+            "#,
+            storage_key, storage_key, json.replace('\'', "\\'").replace('\n', "\\n")
+        )
+    } else {
+        String::new()
+    };
+
+    // Create the webview window
+    let window_label = format!("videasy-{}", tmdb_id);
+    let window_title = if media_type == "tv" {
+        format!("{} - S{}E{}", title, season.unwrap_or(1), episode.unwrap_or(1))
+    } else {
+        title.clone()
+    };
+
+    // Check if window already exists
+    if let Some(existing) = app_handle.get_window(&window_label) {
+        existing.set_focus().map_err(|e| e.to_string())?;
+        return Ok(ApiResponse {
+            message: "Player window already open".to_string(),
+        });
+    }
+
+    // Parse the URL
+    let parsed_url: url::Url = url.parse().map_err(|e| format!("Invalid URL: {}", e))?;
+
+    let window = tauri::WindowBuilder::new(
+        &app_handle,
+        &window_label,
+        tauri::WindowUrl::External(parsed_url)
+    )
+    .title(&window_title)
+    .inner_size(1280.0, 720.0)
+    .min_inner_size(800.0, 450.0)
+    .resizable(true)
+    .fullscreen(false)
+    .center()
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    // Comprehensive popup blocker script
+    let popup_blocker = r#"
+        (function() {
+            'use strict';
+
+            // Block window.open completely
+            const noop = function() {
+                console.log('[Slasshy] Blocked window.open');
+                return null;
+            };
+            window.open = noop;
+
+            // Prevent overriding window.open
+            Object.defineProperty(window, 'open', {
+                value: noop,
+                writable: false,
+                configurable: false
+            });
+
+            // Block popups from iframes
+            try {
+                for (let i = 0; i < window.frames.length; i++) {
+                    try {
+                        window.frames[i].open = noop;
+                    } catch(e) {}
+                }
+            } catch(e) {}
+
+            // Block target="_blank" links and ad clicks
+            document.addEventListener('click', function(e) {
+                let target = e.target;
+                while (target && target.tagName !== 'A') {
+                    target = target.parentElement;
+                }
+                if (target) {
+                    const href = target.getAttribute('href') || '';
+                    const targetAttr = target.getAttribute('target');
+
+                    // Block external links that open in new tabs
+                    if (targetAttr === '_blank' || targetAttr === '_new') {
+                        if (!href.includes('videasy.net') && !href.includes('player.videasy')) {
+                            console.log('[Slasshy] Blocked external link:', href);
+                            e.preventDefault();
+                            e.stopPropagation();
+                            e.stopImmediatePropagation();
+                            return false;
+                        }
+                    }
+
+                    // Block common ad domains
+                    const adDomains = ['popads', 'popcash', 'propeller', 'exoclick', 'juicyads',
+                                       'trafficjunky', 'clickadu', 'adsterra', 'onclick', 'popunder'];
+                    if (adDomains.some(d => href.includes(d))) {
+                        console.log('[Slasshy] Blocked ad link:', href);
+                        e.preventDefault();
+                        e.stopPropagation();
+                        return false;
+                    }
+                }
+            }, true);
+
+            // Block mousedown/mouseup popup triggers
+            ['mousedown', 'mouseup', 'pointerdown', 'pointerup'].forEach(function(eventType) {
+                document.addEventListener(eventType, function(e) {
+                    const target = e.target;
+                    if (target.tagName === 'A' || target.closest('a')) {
+                        const link = target.tagName === 'A' ? target : target.closest('a');
+                        const href = link.getAttribute('href') || '';
+                        if (!href.includes('videasy') && (link.getAttribute('target') === '_blank')) {
+                            e.stopPropagation();
+                        }
+                    }
+                }, true);
+            });
+
+            console.log('[Slasshy] Popup blocker fully active');
+        })();
+    "#;
+
+    // Clone values for the threads
+    let window_for_progress = window.clone();
+    let storage_key_clone = storage_key.clone();
+    let tmdb_id_clone = tmdb_id.clone();
+    let media_type_clone = media_type.clone();
+    let title_clone = title.clone();
+    let poster_path_clone = poster_path.clone();
+    let db_path = database::get_database_path();
+    let season_clone = season;
+    let episode_clone = episode;
+    let window_title_clone = window_title.clone();
+
+    // Progress extraction and saving thread
+    std::thread::spawn(move || {
+        // Wait for page to load
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        // Inject popup blocker
+        if let Err(e) = window_for_progress.eval(popup_blocker) {
+            println!("[VIDEASY] Failed to inject popup blocker: {}", e);
+        } else {
+            println!("[VIDEASY] Popup blocker injected");
+        }
+
+        // Inject saved progress
+        if !inject_script.is_empty() {
+            if let Err(e) = window_for_progress.eval(&inject_script) {
+                println!("[VIDEASY] Failed to inject progress: {}", e);
+            } else {
+                println!("[VIDEASY] Progress injected");
+            }
+        }
+
+        // Track progress using window title as communication channel
+        let mut last_progress_watched: f64 = 0.0;
+        let mut last_progress_duration: f64 = 0.0;
+        let original_title = window_title_clone;
+
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+
+            // Inject script that puts progress in window title temporarily
+            let extract_script = format!(r#"
+                (function() {{
+                    try {{
+                        // Re-block popups
+                        if (!window.__slasshyBlocked) {{
+                            window.__slasshyBlocked = true;
+                            window.open = function() {{ return null; }};
+                        }}
+
+                        const data = localStorage.getItem('{}');
+                        if (data) {{
+                            const parsed = JSON.parse(data);
+                            if (parsed.progress && parsed.progress.watched > 0) {{
+                                // Temporarily set title with progress data
+                                const watched = parsed.progress.watched.toFixed(2);
+                                const duration = parsed.progress.duration.toFixed(2);
+                                document.title = 'SLASSHY_PROGRESS:' + watched + ':' + duration;
+
+                                // Restore title after a short delay
+                                setTimeout(function() {{
+                                    document.title = '{}';
+                                }}, 200);
+                            }}
+                        }}
+                    }} catch (e) {{}}
+                }})();
+            "#, storage_key_clone, original_title.replace('\'', "\\'"));
+
+            match window_for_progress.eval(&extract_script) {
+                Ok(_) => {
+                    // Wait for title to be set
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+
+                    // Try to read the title
+                    if let Ok(title) = window_for_progress.title() {
+                        if title.starts_with("SLASSHY_PROGRESS:") {
+                            let parts: Vec<&str> = title.split(':').collect();
+                            if parts.len() >= 3 {
+                                if let (Ok(w), Ok(d)) = (parts[1].parse::<f64>(), parts[2].parse::<f64>()) {
+                                    last_progress_watched = w;
+                                    last_progress_duration = d;
+                                    println!("[VIDEASY] Progress extracted: {:.1}s / {:.1}s", w, d);
+
+                                    // Save to database periodically
+                                    if let Ok(db) = database::Database::new(&db_path) {
+                                        let poster_url = poster_path_clone.as_ref().map(|p| {
+                                            if p.starts_with("http") { p.clone() }
+                                            else { format!("https://image.tmdb.org/t/p/w342{}", p) }
+                                        });
+
+                                        let _ = db.save_streaming_progress(
+                                            &tmdb_id_clone,
+                                            &media_type_clone,
+                                            &title_clone,
+                                            poster_url.as_deref(),
+                                            season_clone,
+                                            episode_clone,
+                                            last_progress_watched,
+                                            last_progress_duration,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Window is closed - save final progress
+                    println!("[VIDEASY] Window closed, saving final progress...");
+
+                    if last_progress_watched > 0.0 {
+                        if let Ok(db) = database::Database::new(&db_path) {
+                            let poster_url = poster_path_clone.as_ref().map(|p| {
+                                if p.starts_with("http") { p.clone() }
+                                else { format!("https://image.tmdb.org/t/p/w342{}", p) }
+                            });
+
+                            match db.save_streaming_progress(
+                                &tmdb_id_clone,
+                                &media_type_clone,
+                                &title_clone,
+                                poster_url.as_deref(),
+                                season_clone,
+                                episode_clone,
+                                last_progress_watched,
+                                last_progress_duration,
+                            ) {
+                                Ok(_) => println!("[VIDEASY] Final progress saved: {:.1}s / {:.1}s",
+                                                last_progress_watched, last_progress_duration),
+                                Err(e) => println!("[VIDEASY] Failed to save final progress: {}", e),
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok(ApiResponse {
+        message: format!("Videasy player opened for: {}", title),
+    })
+}
+
+// Save progress from Videasy player (called from JavaScript)
+#[tauri::command]
+async fn save_videasy_progress(
+    state: State<'_, AppState>,
+    tmdb_id: String,
+    media_type: String,
+    title: String,
+    poster_path: Option<String>,
+    season: Option<i32>,
+    episode: Option<i32>,
+    position: f64,
+    duration: f64,
+) -> Result<ApiResponse, String> {
+    println!("[VIDEASY] Saving progress: {} - {:.1}s / {:.1}s", title, position, duration);
+
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+
+    let poster_url = poster_path.map(|p| {
+        if p.starts_with("http") {
+            p
+        } else {
+            format!("https://image.tmdb.org/t/p/w342{}", p)
+        }
+    });
+
+    db.save_streaming_progress(
+        &tmdb_id,
+        &media_type,
+        &title,
+        poster_url.as_deref(),
+        season,
+        episode,
+        position,
+        duration,
+    ).map_err(|e| e.to_string())?;
+
+    Ok(ApiResponse {
+        message: "Progress saved".to_string(),
+    })
 }
 
 fn main() {
@@ -1342,7 +1961,11 @@ fn main() {
             search_tmdb,
             get_tv_details,
             get_tv_season_episodes,
+            refresh_series_metadata,
             merge_duplicate_shows,
+            // Videasy player commands
+            open_videasy_player,
+            save_videasy_progress,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

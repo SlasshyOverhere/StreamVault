@@ -264,7 +264,7 @@ export function VideoPlayer({ src, title, poster, onClose, onProgress, initialTi
     return (
         <div
             ref={containerRef}
-            className="fixed inset-0 z-50 bg-black flex items-center justify-center"
+            className="fixed inset-0 z-50 bg-black flex items-center justify-center font-sans"
             onMouseMove={handleMouseMove}
             onClick={(e) => {
                 if (e.target === containerRef.current) {
@@ -313,35 +313,44 @@ export function VideoPlayer({ src, title, poster, onClose, onProgress, initialTi
 
             {/* Loading spinner */}
             {isLoading && (
-                <div className="absolute inset-0 flex items-center justify-center bg-black/50">
-                    <Loader2 className="h-16 w-16 animate-spin text-primary" />
+                <div className="absolute inset-0 flex items-center justify-center bg-black/50 backdrop-blur-sm z-10 transition-opactiy duration-300">
+                    <div className="relative">
+                        <Loader2 className="h-16 w-16 animate-spin text-primary" />
+                        <div className="absolute inset-0 bg-primary/20 blur-xl rounded-full" />
+                    </div>
                 </div>
             )}
 
             {/* Error display */}
             {error && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 text-white">
-                    <p className="text-xl text-red-400">{error}</p>
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 backdrop-blur-md text-white z-20 p-8 text-center">
+                    <div className="bg-destructive/10 p-4 rounded-full mb-4">
+                        <X className="w-12 h-12 text-destructive" />
+                    </div>
+                    <p className="text-xl font-semibold mb-2">Video Error</p>
+                    <p className="text-muted-foreground mb-6 max-w-md">{error}</p>
                     <button
                         onClick={onClose}
-                        className="mt-4 px-4 py-2 bg-primary rounded-lg hover:bg-primary/80 transition-colors"
+                        className="px-6 py-2.5 bg-white text-black font-semibold rounded-full hover:bg-white/90 transition-all transform hover:scale-105 shadow-lg"
                     >
-                        Close
+                        Close Player
                     </button>
                 </div>
             )}
 
             {/* Controls overlay */}
             <div
-                className={`absolute inset-0 flex flex-col justify-between transition-opacity duration-300 ${showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                className={`absolute inset-0 flex flex-col justify-between transition-all duration-500 ease-in-out ${showControls ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4 pointer-events-none'
                     }`}
             >
                 {/* Top bar */}
-                <div className="bg-gradient-to-b from-black/80 to-transparent p-4 flex items-center justify-between">
-                    <h1 className="text-white text-xl font-semibold truncate max-w-[80%]">{title}</h1>
+                <div className="bg-gradient-to-b from-black/60 to-transparent p-6 flex items-start justify-between backdrop-blur-[2px]">
+                    <div className="flex flex-col">
+                        <h1 className="text-white text-xl font-bold tracking-tight drop-shadow-md">{title}</h1>
+                    </div>
                     <button
                         onClick={onClose}
-                        className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                        className="p-2.5 hover:bg-white/10 rounded-full transition-colors backdrop-blur-md bg-black/20 border border-white/5"
                     >
                         <X className="h-6 w-6 text-white" />
                     </button>
@@ -351,21 +360,22 @@ export function VideoPlayer({ src, title, poster, onClose, onProgress, initialTi
                 <div className="flex-1 flex items-center justify-center">
                     <button
                         onClick={togglePlay}
-                        className="p-6 bg-black/50 rounded-full hover:bg-black/70 transition-all transform hover:scale-110"
+                        className="group relative p-8 rounded-full transition-all duration-300 transform hover:scale-110 active:scale-95"
                     >
+                        <div className="absolute inset-0 bg-black/40 backdrop-blur-sm rounded-full border border-white/10 transition-colors group-hover:bg-black/60" />
                         {isPlaying ? (
-                            <Pause className="h-12 w-12 text-white" />
+                            <Pause className="relative h-16 w-16 text-white drop-shadow-lg" />
                         ) : (
-                            <Play className="h-12 w-12 text-white ml-1" />
+                            <Play className="relative h-16 w-16 text-white ml-2 drop-shadow-lg" />
                         )}
                     </button>
                 </div>
 
                 {/* Bottom controls */}
-                <div className="bg-gradient-to-t from-black/80 to-transparent p-4 space-y-3">
+                <div className="bg-gradient-to-t from-black/90 via-black/50 to-transparent pt-20 pb-8 px-8 space-y-4">
                     {/* Progress bar */}
-                    <div className="flex items-center gap-3">
-                        <span className="text-white text-sm font-mono min-w-[50px]">
+                    <div className="flex items-center gap-4">
+                        <span className="text-white/90 text-sm font-medium font-mono min-w-[50px]">
                             {formatTime(currentTime)}
                         </span>
                         <Slider
@@ -375,87 +385,87 @@ export function VideoPlayer({ src, title, poster, onClose, onProgress, initialTi
                             step={0.1}
                             className="flex-1 cursor-pointer"
                         />
-                        <span className="text-white text-sm font-mono min-w-[50px] text-right">
+                        <span className="text-white/60 text-sm font-medium font-mono min-w-[50px] text-right">
                             {formatTime(duration)}
                         </span>
                     </div>
 
                     {/* Control buttons */}
                     <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-4">
                             {/* Play/Pause */}
                             <button
                                 onClick={togglePlay}
-                                className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                                className="p-2.5 hover:bg-white/10 rounded-full transition-colors text-white hover:text-primary"
                             >
                                 {isPlaying ? (
-                                    <Pause className="h-5 w-5 text-white" />
+                                    <Pause className="h-6 w-6 fill-current" />
                                 ) : (
-                                    <Play className="h-5 w-5 text-white" />
+                                    <Play className="h-6 w-6 fill-current" />
                                 )}
                             </button>
 
                             {/* Skip backward */}
                             <button
                                 onClick={() => skip(-10)}
-                                className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                                className="p-2 hover:bg-white/10 rounded-full transition-colors text-white/80 hover:text-white group"
                                 title="Skip back 10 seconds"
                             >
-                                <SkipBack className="h-5 w-5 text-white" />
+                                <SkipBack className="h-5 w-5 group-hover:-translate-x-0.5 transition-transform" />
                             </button>
 
                             {/* Skip forward */}
                             <button
                                 onClick={() => skip(10)}
-                                className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                                className="p-2 hover:bg-white/10 rounded-full transition-colors text-white/80 hover:text-white group"
                                 title="Skip forward 10 seconds"
                             >
-                                <SkipForward className="h-5 w-5 text-white" />
+                                <SkipForward className="h-5 w-5 group-hover:translate-x-0.5 transition-transform" />
                             </button>
 
                             {/* Volume */}
-                            <div className="flex items-center gap-2 group">
+                            <div className="flex items-center gap-2 group/vol">
                                 <button
                                     onClick={toggleMute}
-                                    className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                                    className="p-2 hover:bg-white/10 rounded-full transition-colors text-white/80 hover:text-white"
                                 >
                                     {isMuted || volume === 0 ? (
-                                        <VolumeX className="h-5 w-5 text-white" />
+                                        <VolumeX className="h-5 w-5" />
                                     ) : (
-                                        <Volume2 className="h-5 w-5 text-white" />
+                                        <Volume2 className="h-5 w-5" />
                                     )}
                                 </button>
-                                <div className="w-0 group-hover:w-24 overflow-hidden transition-all duration-200">
+                                <div className="w-0 group-hover/vol:w-28 overflow-hidden transition-all duration-300 ease-out pl-2">
                                     <Slider
                                         value={[isMuted ? 0 : volume * 100]}
                                         onValueChange={handleVolumeChange}
                                         max={100}
                                         step={1}
-                                        className="cursor-pointer"
+                                        className="cursor-pointer py-2"
                                     />
                                 </div>
                             </div>
                         </div>
 
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-3">
                             {/* Settings */}
                             <button
-                                className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                                className="p-2.5 hover:bg-white/10 rounded-full transition-colors text-white/80 hover:text-white"
                                 title="Settings"
                             >
-                                <Settings className="h-5 w-5 text-white" />
+                                <Settings className="h-5 w-5" />
                             </button>
 
                             {/* Fullscreen */}
                             <button
                                 onClick={toggleFullscreen}
-                                className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                                className="p-2.5 hover:bg-white/10 rounded-full transition-colors text-white/80 hover:text-white"
                                 title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
                             >
                                 {isFullscreen ? (
-                                    <Minimize2 className="h-5 w-5 text-white" />
+                                    <Minimize2 className="h-5 w-5" />
                                 ) : (
-                                    <Maximize2 className="h-5 w-5 text-white" />
+                                    <Maximize2 className="h-5 w-5" />
                                 )}
                             </button>
                         </div>

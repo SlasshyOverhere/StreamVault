@@ -2,23 +2,116 @@ import { useEffect, useState } from "react"
 import { listen, UnlistenFn } from "@tauri-apps/api/event"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Play, ChevronLeft } from "lucide-react"
-import { MediaItem, getEpisodes, playMedia, getResumeInfo, getStreamUrl, updateWatchProgress, StreamInfo, getCachedImageUrl, ResumeInfo } from "@/services/api"
+import { Play, ChevronLeft, Clock, Check, Loader2, Star, Timer, ChevronDown, ChevronUp, RefreshCw } from "lucide-react"
+import {
+    MediaItem, getEpisodes, playMedia, getResumeInfo, getStreamUrl, updateWatchProgress,
+    StreamInfo, getCachedImageUrl, ResumeInfo, getTvSeasonEpisodes, TmdbEpisodeInfo,
+    getTmdbImageUrl, refreshSeriesMetadata
+} from "@/services/api"
 import { useToast } from "@/components/ui/use-toast"
 import { PlayerModal } from "@/components/PlayerModal"
 import { VideoPlayer } from "@/components/VideoPlayer"
 import { ResumeDialog } from "@/components/ResumeDialog"
+import { motion } from "framer-motion"
+import { cn } from "@/lib/utils"
 
 interface EpisodeBrowserProps {
     show: MediaItem
     onBack: () => void
 }
 
+// Component to handle episode thumbnail loading from local cache or TMDB
+function EpisodeThumbnailImage({
+    localStillPath,
+    tmdbStillUrl,
+    episodeTitle,
+    episodeNumber
+}: {
+    localStillPath?: string;
+    tmdbStillUrl: string | null;
+    episodeTitle: string;
+    episodeNumber: number;
+}) {
+    const [imageUrl, setImageUrl] = useState<string | null>(null);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        const loadImage = async () => {
+            setLoading(true);
+            setImageUrl(null);
+
+            if (localStillPath) {
+                // Load from local cache - handle paths with or without 'image_cache/' prefix
+                let filename = localStillPath;
+                if (filename.startsWith('image_cache/')) {
+                    filename = filename.replace('image_cache/', '');
+                }
+                console.log(`[EpisodeThumbnail] Loading local image for E${episodeNumber}: ${filename}`);
+
+                try {
+                    const cachedUrl = await getCachedImageUrl(filename);
+                    if (cachedUrl) {
+                        console.log(`[EpisodeThumbnail] Successfully loaded local image for E${episodeNumber}`);
+                        setImageUrl(cachedUrl);
+                        setLoading(false);
+                        return;
+                    } else {
+                        console.log(`[EpisodeThumbnail] getCachedImageUrl returned null for E${episodeNumber}`);
+                    }
+                } catch (error) {
+                    console.log(`[EpisodeThumbnail] Failed to load local image for E${episodeNumber}:`, error);
+                }
+            } else {
+                console.log(`[EpisodeThumbnail] No localStillPath for E${episodeNumber}`);
+            }
+
+            // Fall back to TMDB URL
+            if (tmdbStillUrl) {
+                console.log(`[EpisodeThumbnail] Falling back to TMDB URL for E${episodeNumber}`);
+                setImageUrl(tmdbStillUrl);
+            }
+            setLoading(false);
+        };
+        loadImage();
+    }, [localStillPath, tmdbStillUrl, episodeNumber]);
+
+    if (loading) {
+        return (
+            <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-muted to-muted/50">
+                <Loader2 className="w-6 h-6 animate-spin text-muted-foreground/50" />
+            </div>
+        );
+    }
+
+    if (imageUrl) {
+        return (
+            <img
+                src={imageUrl}
+                alt={episodeTitle}
+                className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+            />
+        );
+    }
+
+    return (
+        <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-muted to-muted/50">
+            <span className="text-2xl font-bold text-muted-foreground/50">
+                {episodeNumber}
+            </span>
+        </div>
+    );
+}
+
 export function EpisodeBrowser({ show, onBack }: EpisodeBrowserProps) {
     const [episodes, setEpisodes] = useState<MediaItem[]>([])
     const [loading, setLoading] = useState(true)
     const [posterUrl, setPosterUrl] = useState<string | null>(null)
+    const [selectedSeason, setSelectedSeason] = useState<number>(1)
     const { toast } = useToast()
+
+    // TMDB episode metadata
+    const [tmdbEpisodes, setTmdbEpisodes] = useState<Map<number, TmdbEpisodeInfo>>(new Map())
+    const [expandedEpisode, setExpandedEpisode] = useState<number | null>(null)
 
     // Player selection state
     const [playerModalOpen, setPlayerModalOpen] = useState(false)
@@ -37,11 +130,13 @@ export function EpisodeBrowser({ show, onBack }: EpisodeBrowserProps) {
         resumeInfo: ResumeInfo;
     } | null>(null)
 
+    // Metadata refresh state
+    const [isRefreshing, setIsRefreshing] = useState(false)
+
     useEffect(() => {
         loadEpisodes()
         loadPoster()
 
-        // Listen for MPV playback ended to refresh progress
         let unlistenMpvEnded: UnlistenFn | undefined;
 
         const setupListener = async () => {
@@ -57,10 +152,49 @@ export function EpisodeBrowser({ show, onBack }: EpisodeBrowserProps) {
         };
     }, [show.id])
 
+    // Load TMDB episode metadata when season changes - only if local data is incomplete
+    useEffect(() => {
+        // Check if local episodes already have the metadata we need
+        const seasonEpisodes = episodes.filter(ep => (ep.season_number || 1) === selectedSeason);
+        const hasLocalMetadata = seasonEpisodes.length > 0 && seasonEpisodes.some(ep => ep.episode_title || ep.still_path);
+
+        // Only fetch from TMDB if we don't have local metadata
+        if (show.tmdb_id && selectedSeason > 0 && !hasLocalMetadata && seasonEpisodes.length === 0) {
+            loadTmdbEpisodes()
+        }
+    }, [show.tmdb_id, selectedSeason, episodes])
+
+    const loadTmdbEpisodes = async () => {
+        if (!show.tmdb_id) return
+
+        try {
+            const tmdbId = parseInt(show.tmdb_id)
+            const seasonDetails = await getTvSeasonEpisodes(tmdbId, selectedSeason)
+
+            if (seasonDetails) {
+                const episodeMap = new Map<number, TmdbEpisodeInfo>()
+                seasonDetails.episodes.forEach(ep => {
+                    episodeMap.set(ep.episode_number, ep)
+                })
+                setTmdbEpisodes(episodeMap)
+            }
+        } catch (error) {
+            console.error("Failed to load TMDB episode metadata", error)
+        }
+    }
+
     const loadEpisodes = async () => {
         try {
             const data = await getEpisodes(show.id)
             setEpisodes(data)
+            // Set initial season ONLY on first load (when episodes is empty)
+            if (data.length > 0 && episodes.length === 0) {
+                const firstSeason = data.reduce((min, ep) =>
+                    ep.season_number && ep.season_number < min ? ep.season_number : min,
+                    data[0].season_number || 1
+                )
+                setSelectedSeason(firstSeason)
+            }
         } catch (error) {
             console.error("Failed to load episodes", error)
             toast({ title: "Error", description: "Failed to load episodes", variant: "destructive" })
@@ -79,19 +213,39 @@ export function EpisodeBrowser({ show, onBack }: EpisodeBrowserProps) {
         }
     }
 
+    const handleRefreshMetadata = async () => {
+        if (!show.tmdb_id || isRefreshing) return;
+
+        setIsRefreshing(true);
+        try {
+            const tmdbId = parseInt(show.tmdb_id);
+            const result = await refreshSeriesMetadata(tmdbId, show.title);
+            toast({ title: "Metadata Refreshed", description: result });
+            // Reload episodes to get updated metadata
+            await loadEpisodes();
+        } catch (error) {
+            toast({ title: "Error", description: "Failed to refresh metadata", variant: "destructive" });
+        } finally {
+            setIsRefreshing(false);
+        }
+    }
+
+    // Get unique seasons
+    const seasons = [...new Set(episodes.map(ep => ep.season_number || 1))].sort((a, b) => a - b)
+
+    // Filter episodes by selected season
+    const filteredEpisodes = episodes
+        .filter(ep => (ep.season_number || 1) === selectedSeason)
+        .sort((a, b) => (a.episode_number || 0) - (b.episode_number || 0))
+
     const handlePlay = async (episode: MediaItem) => {
         try {
             const resumeInfo = await getResumeInfo(episode.id);
 
             if (resumeInfo.has_progress && resumeInfo.progress_percent < 95) {
-                // Show the resume dialog
-                setResumeDialogData({
-                    episode,
-                    resumeInfo,
-                });
+                setResumeDialogData({ episode, resumeInfo });
                 setResumeDialogOpen(true);
             } else {
-                // No resume needed - play from start
                 await startPlayback(episode, 0);
             }
         } catch (e) {
@@ -99,22 +253,20 @@ export function EpisodeBrowser({ show, onBack }: EpisodeBrowserProps) {
         }
     }
 
-    // Handle resume or start over from the dialog
     const handleResumeChoice = async (resume: boolean) => {
         if (!resumeDialogData) return;
-
         const { episode, resumeInfo } = resumeDialogData;
         const resumeTime = resume ? resumeInfo.position : 0;
-
         await startPlayback(episode, resumeTime);
     }
 
-    // Start playback with a specific player
     const startPlayback = async (episode: MediaItem, resumeTime: number) => {
         try {
-            // Direct Play via MPV (as per user request to remove internal player popup)
             await playMedia(episode.id, resumeTime > 0);
-            toast({ title: "Playing", description: `Now playing S${String(episode.season_number).padStart(2, '0')}E${String(episode.episode_number).padStart(2, '0')}` })
+            toast({
+                title: "Playing",
+                description: `Now playing S${String(episode.season_number).padStart(2, '0')}E${String(episode.episode_number).padStart(2, '0')}`
+            })
         } catch (e) {
             toast({ title: "Error", description: "Failed to start playback", variant: "destructive" })
         }
@@ -129,12 +281,8 @@ export function EpisodeBrowser({ show, onBack }: EpisodeBrowserProps) {
             });
             setCurrentPlayingId(episode.id);
             setIsPlayerOpen(true);
-            toast({
-                title: "Playing",
-                description: `Now playing S${String(episode.season_number).padStart(2, '0')}E${String(episode.episode_number).padStart(2, '0')}`
-            });
         } catch (e) {
-            toast({ title: "Error", description: "Failed to get stream URL. Make sure the file is accessible.", variant: "destructive" });
+            toast({ title: "Error", description: "Failed to get stream URL.", variant: "destructive" });
         }
     }
 
@@ -151,10 +299,7 @@ export function EpisodeBrowser({ show, onBack }: EpisodeBrowserProps) {
             } catch (e) {
                 toast({ title: "Error", description: "Failed to start playback", variant: "destructive" })
             }
-        } else if (player === 'stream') {
-            // TODO: Handler for Videasy streaming will be added here
-            toast({ title: "Stream", description: "Videasy streaming coming soon" })
-        } else {
+        } else if (player === 'builtin') {
             await playWithBuiltinPlayer(pendingPlayEpisode, pendingResumeTime);
         }
 
@@ -166,7 +311,6 @@ export function EpisodeBrowser({ show, onBack }: EpisodeBrowserProps) {
         setIsPlayerOpen(false);
         setCurrentStreamInfo(null);
         setCurrentPlayingId(null);
-        // Refresh episodes to update progress
         loadEpisodes();
     }
 
@@ -180,60 +324,259 @@ export function EpisodeBrowser({ show, onBack }: EpisodeBrowserProps) {
         }
     }
 
-    const imageSrc = posterUrl || `https://placehold.co/500x750/374151/d1d5db?text=${encodeURIComponent(show.title)}`;
+    const imageSrc = posterUrl || `https://placehold.co/400x600/1a1a2e/3a3a4e?text=${encodeURIComponent(show.title.slice(0, 2))}`;
 
     return (
         <>
-            <div className="h-full flex flex-col animate-in slide-in-from-right-10 duration-300">
-                <Button variant="ghost" onClick={onBack} className="w-fit mb-4 pl-0 hover:bg-transparent hover:text-primary">
-                    <ChevronLeft className="mr-2 h-4 w-4" /> Back to TV Shows
-                </Button>
+            <motion.div
+                initial={{ opacity: 0, x: 20 }}
+                animate={{ opacity: 1, x: 0 }}
+                className="h-full flex flex-col"
+            >
+                {/* Back Button */}
+                <button
+                    onClick={onBack}
+                    className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-colors mb-6 w-fit"
+                >
+                    <ChevronLeft className="w-4 h-4" />
+                    <span className="text-sm font-medium">Back to TV Shows</span>
+                </button>
 
-                <div className="flex flex-col md:flex-row gap-8 h-full overflow-hidden">
-                    <div className="w-full md:w-1/3 flex-shrink-0">
-                        <div className="rounded-lg overflow-hidden shadow-xl border">
-                            <img
-                                src={imageSrc}
-                                alt={show.title}
-                                className="w-full h-auto object-cover aspect-[2/3]"
-                            />
-                        </div>
-                        <div className="mt-6">
-                            <h1 className="text-3xl font-bold">{show.title}</h1>
-                            {show.year && <p className="text-muted-foreground mt-1 text-lg">{show.year}</p>}
-                            <p className="mt-4 text-sm text-muted-foreground leading-relaxed">{show.overview || "No overview available."}</p>
+                <div className="flex flex-col lg:flex-row gap-8 flex-1 min-h-0">
+                    {/* Left: Show Info */}
+                    <div className="w-full lg:w-80 flex-shrink-0">
+                        <div className="sticky top-0">
+                            {/* Poster */}
+                            <div className="rounded-xl overflow-hidden shadow-elevation-2 mb-6">
+                                <img
+                                    src={imageSrc}
+                                    alt={show.title}
+                                    className="w-full aspect-[2/3] object-cover"
+                                />
+                            </div>
+
+                            {/* Title & Info */}
+                            <h1 className="text-2xl font-bold text-foreground mb-2">{show.title}</h1>
+                            {show.year && (
+                                <p className="text-muted-foreground mb-4">{show.year}</p>
+                            )}
+
+                            {/* Stats */}
+                            <div className="flex gap-4 mb-4 flex-wrap">
+                                <div className="px-3 py-1.5 rounded-lg bg-muted text-sm">
+                                    {seasons.length} Season{seasons.length !== 1 ? 's' : ''}
+                                </div>
+                                <div className="px-3 py-1.5 rounded-lg bg-muted text-sm">
+                                    {episodes.length} Episode{episodes.length !== 1 ? 's' : ''}
+                                </div>
+                                {show.tmdb_id && (
+                                    <button
+                                        onClick={handleRefreshMetadata}
+                                        disabled={isRefreshing}
+                                        className="px-3 py-1.5 rounded-lg bg-muted hover:bg-muted/80 text-sm flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                                        title="Refresh metadata and images from TMDB"
+                                    >
+                                        <RefreshCw className={cn("w-3.5 h-3.5", isRefreshing && "animate-spin")} />
+                                        {isRefreshing ? "Refreshing..." : "Refresh"}
+                                    </button>
+                                )}
+                            </div>
+
+                            {/* Overview */}
+                            {show.overview && (
+                                <p className="text-sm text-muted-foreground leading-relaxed line-clamp-4">
+                                    {show.overview}
+                                </p>
+                            )}
                         </div>
                     </div>
 
+                    {/* Right: Episodes */}
                     <div className="flex-1 flex flex-col min-h-0">
-                        <h2 className="text-2xl font-semibold mb-4">Episodes</h2>
-                        <div className="flex-1 border rounded-md bg-card">
-                            <ScrollArea className="h-[calc(100vh-200px)]">
+                        {/* Season Tabs */}
+                        {seasons.length > 1 && (
+                            <div className="flex gap-2 mb-4 flex-wrap">
+                                {seasons.map((season) => (
+                                    <button
+                                        key={season}
+                                        onClick={() => setSelectedSeason(season)}
+                                        className={cn(
+                                            "px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200",
+                                            selectedSeason === season
+                                                ? "bg-primary text-primary-foreground"
+                                                : "bg-muted text-muted-foreground hover:text-foreground hover:bg-muted/80"
+                                        )}
+                                    >
+                                        Season {season}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* Episode List */}
+                        <div className="flex-1 rounded-xl border border-border bg-card overflow-hidden">
+                            <ScrollArea className="h-full max-h-[calc(100vh-280px)]">
                                 {loading ? (
-                                    <div className="p-8 text-center text-muted-foreground">Loading episodes...</div>
-                                ) : episodes.length === 0 ? (
-                                    <div className="p-8 text-center text-muted-foreground">No episodes found.</div>
+                                    <div className="p-8 flex items-center justify-center text-muted-foreground">
+                                        <Loader2 className="w-6 h-6 animate-spin mr-2" />
+                                        Loading episodes...
+                                    </div>
+                                ) : filteredEpisodes.length === 0 ? (
+                                    <div className="p-8 text-center text-muted-foreground">
+                                        No episodes found for Season {selectedSeason}
+                                    </div>
                                 ) : (
-                                    <div className="divide-y">
-                                        {episodes.map((episode) => {
-                                            const progress = episode.progress_percent || (episode.resume_position_seconds && episode.duration_seconds ? (episode.resume_position_seconds / episode.duration_seconds) * 100 : 0);
+                                    <div className="divide-y divide-border">
+                                        {filteredEpisodes.map((episode, index) => {
+                                            const progress = episode.progress_percent ||
+                                                (episode.resume_position_seconds && episode.duration_seconds
+                                                    ? (episode.resume_position_seconds / episode.duration_seconds) * 100
+                                                    : 0);
+                                            const isFinished = progress >= 95;
+                                            const hasProgress = progress > 0 && !isFinished;
+
+                                            // Use local data first, fall back to TMDB data
+                                            const tmdbData = tmdbEpisodes.get(episode.episode_number || 0);
+                                            // Prefer local still_path over TMDB
+                                            const localStillPath = episode.still_path;
+                                            const stillUrl = localStillPath
+                                                ? null // Will be loaded from cache below
+                                                : getTmdbImageUrl(tmdbData?.still_path, 'w300');
+                                            // Use local episode title first, then TMDB, then fallback
+                                            const episodeTitle = episode.episode_title || tmdbData?.name || episode.title || `Episode ${episode.episode_number}`;
+                                            const isExpanded = expandedEpisode === episode.id;
+
+                                            // Debug logging for episode data
+                                            console.log(`[Episode S${episode.season_number}E${episode.episode_number}] still_path: ${episode.still_path}, episode_title: ${episode.episode_title}`);
+
                                             return (
-                                                <div key={episode.id} className="p-4 hover:bg-muted/50 transition-colors flex items-center justify-between group">
-                                                    <div className="space-y-1">
-                                                        <p className="font-medium">
-                                                            S{String(episode.season_number).padStart(2, '0')}E{String(episode.episode_number).padStart(2, '0')}
-                                                        </p>
-                                                        <p className="text-sm text-muted-foreground">{episode.title}</p>
-                                                        {progress > 0 && progress < 95 && (
-                                                            <div className="w-24 h-1 bg-secondary rounded-full mt-2">
-                                                                <div className="h-full bg-primary rounded-full" style={{ width: `${progress}%` }} />
+                                                <motion.div
+                                                    key={episode.id}
+                                                    initial={{ opacity: 0, y: 10 }}
+                                                    animate={{ opacity: 1, y: 0 }}
+                                                    transition={{ delay: index * 0.02 }}
+                                                    className="hover:bg-muted/30 transition-colors"
+                                                >
+                                                    <div
+                                                        onClick={() => handlePlay(episode)}
+                                                        className="p-4 cursor-pointer group"
+                                                    >
+                                                        <div className="flex gap-4">
+                                                            {/* Episode Thumbnail */}
+                                                            <div className="relative flex-shrink-0 w-40 aspect-video rounded-lg overflow-hidden bg-muted">
+                                                                <EpisodeThumbnailImage
+                                                                    localStillPath={localStillPath}
+                                                                    tmdbStillUrl={stillUrl}
+                                                                    episodeTitle={episodeTitle}
+                                                                    episodeNumber={episode.episode_number || 0}
+                                                                />
+
+                                                                {/* Play overlay */}
+                                                                <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                                                                    <div className="w-10 h-10 rounded-full bg-primary flex items-center justify-center">
+                                                                        <Play className="w-5 h-5 text-white fill-white ml-0.5" />
+                                                                    </div>
+                                                                </div>
+
+                                                                {/* Progress bar on thumbnail */}
+                                                                {hasProgress && (
+                                                                    <div className="absolute bottom-0 left-0 right-0 h-1 bg-black/50">
+                                                                        <div
+                                                                            className="h-full bg-primary"
+                                                                            style={{ width: `${progress}%` }}
+                                                                        />
+                                                                    </div>
+                                                                )}
+
+                                                                {/* Watched badge */}
+                                                                {isFinished && (
+                                                                    <div className="absolute top-2 right-2 px-2 py-0.5 rounded bg-emerald-500 text-white text-xs font-medium flex items-center gap-1">
+                                                                        <Check className="w-3 h-3" />
+                                                                    </div>
+                                                                )}
                                                             </div>
-                                                        )}
+
+                                                            {/* Episode Info */}
+                                                            <div className="flex-1 min-w-0 py-1">
+                                                                {/* Header row */}
+                                                                <div className="flex items-start justify-between gap-2">
+                                                                    <div className="flex-1 min-w-0">
+                                                                        <div className="flex items-center gap-2 mb-1">
+                                                                            <span className="text-xs font-medium text-primary">
+                                                                                Episode {episode.episode_number}
+                                                                            </span>
+                                                                            {hasProgress && (
+                                                                                <span className="badge-primary flex items-center gap-1 text-xs">
+                                                                                    <Clock className="w-3 h-3" />
+                                                                                    {Math.round(progress)}%
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+                                                                        <h4 className="font-semibold text-foreground line-clamp-1">
+                                                                            {episodeTitle}
+                                                                        </h4>
+                                                                    </div>
+
+                                                                    {/* Play button */}
+                                                                    <Button
+                                                                        size="sm"
+                                                                        className="flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            handlePlay(episode);
+                                                                        }}
+                                                                    >
+                                                                        <Play className="w-4 h-4 fill-current mr-1" />
+                                                                        Play
+                                                                    </Button>
+                                                                </div>
+
+                                                                {/* Metadata row - show duration from local file if available */}
+                                                                <div className="flex items-center gap-3 mt-1.5 text-xs text-muted-foreground">
+                                                                    {episode.duration_seconds && (
+                                                                        <span className="flex items-center gap-1">
+                                                                            <Timer className="w-3 h-3" />
+                                                                            {Math.round(episode.duration_seconds / 60)} min
+                                                                        </span>
+                                                                    )}
+                                                                    {tmdbData?.vote_average && tmdbData.vote_average > 0 && (
+                                                                        <span className="flex items-center gap-1">
+                                                                            <Star className="w-3 h-3 text-amber-400 fill-amber-400" />
+                                                                            {tmdbData.vote_average.toFixed(1)}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+
+                                                                {/* Overview/Description - use local overview first */}
+                                                                {(episode.overview || tmdbData?.overview) && (
+                                                                    <div className="mt-2">
+                                                                        <p className={cn(
+                                                                            "text-sm text-muted-foreground",
+                                                                            isExpanded ? "" : "line-clamp-2"
+                                                                        )}>
+                                                                            {episode.overview || tmdbData?.overview}
+                                                                        </p>
+                                                                        {((episode.overview || tmdbData?.overview) || '').length > 150 && (
+                                                                            <button
+                                                                                onClick={(e) => {
+                                                                                    e.stopPropagation();
+                                                                                    setExpandedEpisode(isExpanded ? null : episode.id);
+                                                                                }}
+                                                                                className="text-xs text-primary hover:underline mt-1 flex items-center gap-0.5"
+                                                                            >
+                                                                                {isExpanded ? (
+                                                                                    <>Show less <ChevronUp className="w-3 h-3" /></>
+                                                                                ) : (
+                                                                                    <>Show more <ChevronDown className="w-3 h-3" /></>
+                                                                                )}
+                                                                            </button>
+                                                                        )}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
                                                     </div>
-                                                    <Button size="icon" className="opacity-0 group-hover:opacity-100 transition-opacity" onClick={() => handlePlay(episode)}>
-                                                        <Play className="h-4 w-4" />
-                                                    </Button>
-                                                </div>
+                                                </motion.div>
                                             )
                                         })}
                                     </div>
@@ -242,7 +585,7 @@ export function EpisodeBrowser({ show, onBack }: EpisodeBrowserProps) {
                         </div>
                     </div>
                 </div>
-            </div>
+            </motion.div>
 
             {/* Player Selection Modal */}
             <PlayerModal

@@ -46,6 +46,8 @@ pub struct MediaItem {
     pub parent_id: Option<i64>,
     pub progress_percent: Option<f64>,
     pub tmdb_id: Option<String>,
+    pub episode_title: Option<String>,
+    pub still_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +57,26 @@ pub struct ResumeInfo {
     pub duration: f64,
     pub time_str: String,
     pub progress_percent: f64,
+}
+
+/// Cached episode metadata from TMDB
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedEpisodeMetadata {
+    pub episode_title: Option<String>,
+    pub overview: Option<String>,
+    pub still_path: Option<String>,
+    pub air_date: Option<String>,
+}
+
+/// Full cached episode metadata (includes season/episode numbers)
+#[derive(Debug, Clone)]
+pub struct CachedEpisodeMetadataFull {
+    pub episode_title: Option<String>,
+    pub overview: Option<String>,
+    pub still_path: Option<String>,
+    pub air_date: Option<String>,
+    pub season_number: i32,
+    pub episode_number: i32,
 }
 
 /// Streaming history item for online content (Videasy, etc.)
@@ -136,7 +158,30 @@ impl Database {
         if !columns.contains(&"tmdb_id".to_string()) {
             self.conn.execute("ALTER TABLE media ADD COLUMN tmdb_id TEXT DEFAULT NULL", [])?;
         }
-        
+        if !columns.contains(&"episode_title".to_string()) {
+            self.conn.execute("ALTER TABLE media ADD COLUMN episode_title TEXT DEFAULT NULL", [])?;
+        }
+        if !columns.contains(&"still_path".to_string()) {
+            self.conn.execute("ALTER TABLE media ADD COLUMN still_path TEXT DEFAULT NULL", [])?;
+        }
+
+        // Create cached_episode_metadata table for pre-fetched episode info from TMDB
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS cached_episode_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                series_tmdb_id TEXT NOT NULL,
+                season_number INTEGER NOT NULL,
+                episode_number INTEGER NOT NULL,
+                episode_title TEXT,
+                overview TEXT,
+                still_path TEXT,
+                air_date TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(series_tmdb_id, season_number, episode_number)
+            )",
+            [],
+        )?;
+
         // Create streaming history table for online content (Videasy, etc.)
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS streaming_history (
@@ -149,9 +194,26 @@ impl Database {
                 episode INTEGER,
                 resume_position_seconds REAL DEFAULT 0,
                 duration_seconds REAL DEFAULT 0,
-                last_watched TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(tmdb_id, media_type, season, episode)
+                last_watched TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )",
+            [],
+        )?;
+
+        // Clean up duplicate entries before creating unique index
+        // Keep only the most recent entry for each unique combination
+        self.conn.execute(
+            "DELETE FROM streaming_history WHERE id NOT IN (
+                SELECT MAX(id) FROM streaming_history
+                GROUP BY tmdb_id, media_type, COALESCE(season, -1), COALESCE(episode, -1)
+            )",
+            [],
+        )?;
+
+        // Create unique index that handles NULL values properly using COALESCE
+        // This will now succeed since duplicates are removed
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_streaming_unique
+             ON streaming_history (tmdb_id, media_type, COALESCE(season, -1), COALESCE(episode, -1))",
             [],
         )?;
         
@@ -160,77 +222,79 @@ impl Database {
     
     pub fn get_library(&self, media_type: &str, search: Option<&str>) -> Result<Vec<MediaItem>> {
         let mut sql = String::from(
-            "SELECT id, title, year, overview, poster_path, file_path, media_type, 
+            "SELECT id, title, year, overview, poster_path, file_path, media_type,
                     duration_seconds, resume_position_seconds, last_watched,
-                    season_number, episode_number, parent_id, tmdb_id
+                    season_number, episode_number, parent_id, tmdb_id, episode_title, still_path
              FROM media WHERE media_type = ?"
         );
-        
+
         if search.is_some() {
             sql.push_str(" AND title LIKE ?");
         }
         sql.push_str(" ORDER BY title");
-        
+
         let mut stmt = self.conn.prepare(&sql)?;
-        
+
         let items = if let Some(query) = search {
             stmt.query_map(params![media_type, format!("%{}%", query)], Self::map_media_item)?
         } else {
             stmt.query_map(params![media_type], Self::map_media_item)?
         };
-        
+
         items.filter_map(|r| r.ok()).collect::<Vec<_>>().into_iter().map(Ok).collect()
     }
-    
+
     pub fn get_episodes(&self, series_id: i64) -> Result<Vec<MediaItem>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, year, overview, poster_path, file_path, media_type,
                     duration_seconds, resume_position_seconds, last_watched,
-                    season_number, episode_number, parent_id, tmdb_id
+                    season_number, episode_number, parent_id, tmdb_id, episode_title, still_path
              FROM media WHERE parent_id = ? ORDER BY season_number, episode_number"
         )?;
-        
+
         let items = stmt.query_map(params![series_id], Self::map_media_item)?;
         items.filter_map(|r| r.ok()).collect::<Vec<_>>().into_iter().map(Ok).collect()
     }
     
     pub fn get_watch_history(&self, limit: i32) -> Result<Vec<MediaItem>> {
         let mut stmt = self.conn.prepare(
-            "SELECT 
-                m.id, 
+            "SELECT
+                m.id,
                 CASE WHEN m.media_type = 'tvepisode' THEN p.title ELSE m.title END as title,
                 CASE WHEN m.media_type = 'tvepisode' THEN p.year ELSE m.year END as year,
-                m.overview, 
+                m.overview,
                 CASE WHEN m.media_type = 'tvepisode' THEN p.poster_path ELSE m.poster_path END as poster_path,
-                m.file_path, 
+                m.file_path,
                 m.media_type,
-                m.duration_seconds, 
-                m.resume_position_seconds, 
+                m.duration_seconds,
+                m.resume_position_seconds,
                 m.last_watched,
-                m.season_number, 
-                m.episode_number, 
+                m.season_number,
+                m.episode_number,
                 m.parent_id,
-                CASE WHEN m.media_type = 'tvepisode' THEN p.tmdb_id ELSE m.tmdb_id END as tmdb_id
+                CASE WHEN m.media_type = 'tvepisode' THEN p.tmdb_id ELSE m.tmdb_id END as tmdb_id,
+                m.episode_title,
+                m.still_path
              FROM media m
              LEFT JOIN media p ON m.parent_id = p.id
-             WHERE m.last_watched IS NOT NULL 
+             WHERE m.last_watched IS NOT NULL
                AND m.media_type IN ('movie', 'tvepisode')
-             ORDER BY m.last_watched DESC 
+             ORDER BY m.last_watched DESC
              LIMIT ?"
         )?;
-        
+
         let items = stmt.query_map(params![limit], Self::map_media_item)?;
         items.filter_map(|r| r.ok()).collect::<Vec<_>>().into_iter().map(Ok).collect()
     }
-    
+
     pub fn get_media_by_id(&self, id: i64) -> Result<MediaItem> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, year, overview, poster_path, file_path, media_type,
                     duration_seconds, resume_position_seconds, last_watched,
-                    season_number, episode_number, parent_id, tmdb_id
+                    season_number, episode_number, parent_id, tmdb_id, episode_title, still_path
              FROM media WHERE id = ?"
         )?;
-        
+
         stmt.query_row(params![id], Self::map_media_item)
     }
     
@@ -345,19 +409,36 @@ impl Database {
         position: f64,
         duration: f64,
     ) -> Result<()> {
-        // Use UPSERT (INSERT OR REPLACE) to handle both new and existing entries
-        self.conn.execute(
-            "INSERT INTO streaming_history (tmdb_id, media_type, title, poster_path, season, episode, resume_position_seconds, duration_seconds, last_watched)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-             ON CONFLICT(tmdb_id, media_type, season, episode) 
-             DO UPDATE SET 
-                title = excluded.title,
-                poster_path = COALESCE(excluded.poster_path, streaming_history.poster_path),
-                resume_position_seconds = excluded.resume_position_seconds,
-                duration_seconds = CASE WHEN excluded.duration_seconds > 0 THEN excluded.duration_seconds ELSE streaming_history.duration_seconds END,
-                last_watched = datetime('now')",
-            params![tmdb_id, media_type, title, poster_path, season, episode, position, duration],
-        )?;
+        // First try to find existing entry using COALESCE for NULL-safe comparison
+        let existing_id: Option<i64> = self.conn.query_row(
+            "SELECT id FROM streaming_history
+             WHERE tmdb_id = ? AND media_type = ?
+             AND COALESCE(season, -1) = COALESCE(?, -1)
+             AND COALESCE(episode, -1) = COALESCE(?, -1)",
+            params![tmdb_id, media_type, season, episode],
+            |row| row.get(0)
+        ).ok();
+
+        if let Some(id) = existing_id {
+            // Update existing entry
+            self.conn.execute(
+                "UPDATE streaming_history SET
+                    title = ?,
+                    poster_path = COALESCE(?, poster_path),
+                    resume_position_seconds = ?,
+                    duration_seconds = CASE WHEN ? > 0 THEN ? ELSE duration_seconds END,
+                    last_watched = datetime('now')
+                 WHERE id = ?",
+                params![title, poster_path, position, duration, duration, id],
+            )?;
+        } else {
+            // Insert new entry
+            self.conn.execute(
+                "INSERT INTO streaming_history (tmdb_id, media_type, title, poster_path, season, episode, resume_position_seconds, duration_seconds, last_watched)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+                params![tmdb_id, media_type, title, poster_path, season, episode, position, duration],
+            )?;
+        }
         Ok(())
     }
     
@@ -635,36 +716,257 @@ impl Database {
     pub fn insert_episode(&self, title: &str, file_path: &str, parent_id: i64,
                          season: i32, episode: i32, duration: f64) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO media (title, file_path, media_type, parent_id, season_number, episode_number, duration_seconds) 
+            "INSERT INTO media (title, file_path, media_type, parent_id, season_number, episode_number, duration_seconds)
              VALUES (?, ?, 'tvepisode', ?, ?, ?, ?)",
             params![title, file_path, parent_id, season, episode, duration],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
-    
+
+    /// Insert episode with full metadata (title, overview, still image)
+    pub fn insert_episode_with_metadata(
+        &self,
+        title: &str,
+        file_path: &str,
+        parent_id: i64,
+        season: i32,
+        episode: i32,
+        duration: f64,
+        episode_title: Option<&str>,
+        overview: Option<&str>,
+        still_path: Option<&str>,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO media (title, file_path, media_type, parent_id, season_number, episode_number, duration_seconds, episode_title, overview, still_path)
+             VALUES (?, ?, 'tvepisode', ?, ?, ?, ?, ?, ?, ?)",
+            params![title, file_path, parent_id, season, episode, duration, episode_title, overview, still_path],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Update an existing episode with metadata
+    pub fn update_episode_metadata(
+        &self,
+        episode_id: i64,
+        episode_title: Option<&str>,
+        overview: Option<&str>,
+        still_path: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE media SET episode_title = ?, overview = ?, still_path = ? WHERE id = ?",
+            params![episode_title, overview, still_path, episode_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get all episodes user has for a series (returns id, season_number, episode_number)
+    pub fn get_owned_episodes_for_series(&self, series_id: i64) -> Result<Vec<(i64, i32, i32)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, season_number, episode_number FROM media
+             WHERE parent_id = ? AND media_type = 'tvepisode'
+             ORDER BY season_number, episode_number"
+        )?;
+
+        let items = stmt.query_map(params![series_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<i32>>(1)?.unwrap_or(1),
+                row.get::<_, Option<i32>>(2)?.unwrap_or(1),
+            ))
+        })?;
+
+        items.collect()
+    }
+
+    /// Find series ID by TMDB ID
+    pub fn find_series_id_by_tmdb(&self, tmdb_id: &str) -> Result<Option<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM media WHERE tmdb_id = ? AND media_type = 'tvshow'"
+        )?;
+
+        match stmt.query_row(params![tmdb_id], |row| row.get::<_, i64>(0)) {
+            Ok(id) => Ok(Some(id)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    // ==================== CACHED EPISODE METADATA FUNCTIONS ====================
+
+    /// Save cached episode metadata from TMDB (for pre-fetching)
+    pub fn save_cached_episode_metadata(
+        &self,
+        series_tmdb_id: &str,
+        season_number: i32,
+        episode_number: i32,
+        episode_title: Option<&str>,
+        overview: Option<&str>,
+        still_path: Option<&str>,
+        air_date: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO cached_episode_metadata
+             (series_tmdb_id, season_number, episode_number, episode_title, overview, still_path, air_date, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+            params![series_tmdb_id, season_number, episode_number, episode_title, overview, still_path, air_date],
+        )?;
+        Ok(())
+    }
+
+    /// Get cached episode metadata
+    pub fn get_cached_episode_metadata(
+        &self,
+        series_tmdb_id: &str,
+        season_number: i32,
+        episode_number: i32,
+    ) -> Result<Option<CachedEpisodeMetadata>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT episode_title, overview, still_path, air_date
+             FROM cached_episode_metadata
+             WHERE series_tmdb_id = ? AND season_number = ? AND episode_number = ?"
+        )?;
+
+        match stmt.query_row(params![series_tmdb_id, season_number, episode_number], |row| {
+            Ok(CachedEpisodeMetadata {
+                episode_title: row.get(0)?,
+                overview: row.get(1)?,
+                still_path: row.get(2)?,
+                air_date: row.get(3)?,
+            })
+        }) {
+            Ok(metadata) => Ok(Some(metadata)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Check if episode metadata is cached for a series
+    pub fn has_cached_metadata_for_series(&self, series_tmdb_id: &str) -> Result<bool> {
+        let count: i32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM cached_episode_metadata WHERE series_tmdb_id = ?",
+            params![series_tmdb_id],
+            |row| row.get(0)
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Clear cached episode metadata for a series (for refresh)
+    pub fn clear_cached_metadata_for_series(&self, series_tmdb_id: &str) -> Result<usize> {
+        let deleted = self.conn.execute(
+            "DELETE FROM cached_episode_metadata WHERE series_tmdb_id = ?",
+            params![series_tmdb_id],
+        )?;
+        Ok(deleted)
+    }
+
+    /// Get all cached episodes for a series
+    pub fn get_all_cached_episodes_for_series(&self, series_tmdb_id: &str) -> Result<Vec<CachedEpisodeMetadata>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT episode_title, overview, still_path, air_date, season_number, episode_number
+             FROM cached_episode_metadata
+             WHERE series_tmdb_id = ?
+             ORDER BY season_number, episode_number"
+        )?;
+
+        let items = stmt.query_map(params![series_tmdb_id], |row| {
+            Ok(CachedEpisodeMetadataFull {
+                episode_title: row.get(0)?,
+                overview: row.get(1)?,
+                still_path: row.get(2)?,
+                air_date: row.get(3)?,
+                season_number: row.get(4)?,
+                episode_number: row.get(5)?,
+            })
+        })?;
+
+        items.filter_map(|r| r.ok().map(|f| CachedEpisodeMetadata {
+            episode_title: f.episode_title,
+            overview: f.overview,
+            still_path: f.still_path,
+            air_date: f.air_date,
+        })).collect::<Vec<_>>().into_iter().map(Ok).collect()
+    }
+
+    /// Get cached episodes for a specific season of a series
+    pub fn get_cached_episodes_for_season(&self, series_tmdb_id: &str, season_number: i32) -> Result<Vec<CachedEpisodeMetadataFull>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT episode_title, overview, still_path, air_date, season_number, episode_number
+             FROM cached_episode_metadata
+             WHERE series_tmdb_id = ? AND season_number = ?
+             ORDER BY episode_number"
+        )?;
+
+        let items = stmt.query_map(params![series_tmdb_id, season_number], |row| {
+            Ok(CachedEpisodeMetadataFull {
+                episode_title: row.get(0)?,
+                overview: row.get(1)?,
+                still_path: row.get(2)?,
+                air_date: row.get(3)?,
+                season_number: row.get(4)?,
+                episode_number: row.get(5)?,
+            })
+        })?;
+
+        items.collect()
+    }
+
     /// Get all media entries (for cleanup purposes)
     pub fn get_all_media(&self) -> Result<Vec<MediaItem>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, year, overview, poster_path, file_path, media_type,
                     duration_seconds, resume_position_seconds, last_watched,
-                    season_number, episode_number, parent_id, tmdb_id
+                    season_number, episode_number, parent_id, tmdb_id, episode_title, still_path
              FROM media"
         )?;
-        
+
         let items = stmt.query_map([], Self::map_media_item)?;
         items.filter_map(|r| r.ok()).collect::<Vec<_>>().into_iter().map(Ok).collect()
     }
     
-    /// Get all poster paths currently in use
+    /// Get all poster paths currently in use (including still_paths and cached episode images)
     pub fn get_all_poster_paths(&self) -> Result<Vec<String>> {
+        let mut all_paths = Vec::new();
+
+        // Get poster paths from media table
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT poster_path FROM media WHERE poster_path IS NOT NULL"
         )?;
-        
+        let paths = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        for path in paths.filter_map(|r| r.ok()) {
+            all_paths.push(path);
+        }
+
+        // Get still paths from media table
+        let mut stmt2 = self.conn.prepare(
+            "SELECT DISTINCT still_path FROM media WHERE still_path IS NOT NULL"
+        )?;
+        let still_paths = stmt2.query_map([], |row| row.get::<_, String>(0))?;
+        for path in still_paths.filter_map(|r| r.ok()) {
+            all_paths.push(path);
+        }
+
+        // Get still paths from cached episode metadata
+        let mut stmt3 = self.conn.prepare(
+            "SELECT DISTINCT still_path FROM cached_episode_metadata WHERE still_path IS NOT NULL"
+        )?;
+        let cached_paths = stmt3.query_map([], |row| row.get::<_, String>(0))?;
+        for path in cached_paths.filter_map(|r| r.ok()) {
+            all_paths.push(path);
+        }
+
+        Ok(all_paths)
+    }
+
+    /// Get all file paths for fast lookup during scanning
+    pub fn get_all_file_paths(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT file_path FROM media WHERE file_path IS NOT NULL"
+        )?;
+
         let paths = stmt.query_map([], |row| row.get::<_, String>(0))?;
         paths.filter_map(|r| r.ok()).collect::<Vec<_>>().into_iter().map(Ok).collect()
     }
-    
+
     /// Remove a media entry by ID
     pub fn remove_media(&self, id: i64) -> Result<Option<String>> {
         // First get the poster path so we can clean it up
@@ -895,6 +1197,9 @@ impl Database {
         // Delete all data from media table
         self.conn.execute("DELETE FROM media", [])?;
 
+        // Delete all cached episode metadata (important - stale cache causes missing images)
+        self.conn.execute("DELETE FROM cached_episode_metadata", [])?;
+
         // Return the image cache path for the caller to delete
         Ok(get_image_cache_dir())
     }
@@ -924,6 +1229,8 @@ impl Database {
             parent_id: row.get(12)?,
             progress_percent,
             tmdb_id: row.get(13)?,
+            episode_title: row.get(14)?,
+            still_path: row.get(15)?,
         })
     }
 }

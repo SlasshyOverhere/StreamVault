@@ -1,11 +1,11 @@
-import { useState, useCallback } from 'react';
-import { Search, Film, Tv, Loader2, Play, Star } from 'lucide-react';
+import { useState, useCallback, useEffect } from 'react';
+import { Search, Film, Tv, Loader2, Play, Star, TrendingUp, Clock } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { invoke } from '@tauri-apps/api/tauri';
-import { open } from '@tauri-apps/api/shell';
 import { EpisodeSelector } from './EpisodeSelector';
 import { useToast } from './ui/use-toast';
-import { saveStreamingProgress } from '@/services/api';
+import { saveStreamingProgress, getStreamingHistory, StreamingHistoryItem, openVideasyPlayer } from '@/services/api';
+import { cn } from '@/lib/utils';
 
 // Videasy player base URL - opens directly in browser
 const VIDEASY_PLAYER_BASE = 'https://player.videasy.net';
@@ -13,7 +13,6 @@ const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p';
 const SLASSHY_COLOR = '8B5CF6'; // Slasshy brand purple
 
 // Build Videasy player URL with all features
-// IMPORTANT: Videasy requires parameters in a specific order to work correctly
 function buildVideasyUrl(
     mediaType: 'movie' | 'tv',
     tmdbId: number,
@@ -25,13 +24,11 @@ function buildVideasyUrl(
 
     if (mediaType === 'movie') {
         baseUrl = `${VIDEASY_PLAYER_BASE}/movie/${tmdbId}`;
-        // Movie params: overlay first, then color
         queryString = `overlay=true&color=${SLASSHY_COLOR}`;
     } else {
         const s = season || 1;
         const ep = episode || 1;
         baseUrl = `${VIDEASY_PLAYER_BASE}/tv/${tmdbId}/${s}/${ep}`;
-        // TV params in required order: nextEpisode, autoplayNextEpisode, episodeSelector, overlay, color
         queryString = `nextEpisode=true&autoplayNextEpisode=true&episodeSelector=true&overlay=true&color=${SLASSHY_COLOR}`;
     }
 
@@ -62,10 +59,25 @@ export function StreamView() {
     const [isSearching, setIsSearching] = useState(false);
     const [selectedItem, setSelectedItem] = useState<TmdbSearchResult | null>(null);
     const [isEpisodeSelectorOpen, setIsEpisodeSelectorOpen] = useState(false);
+    const [recentStreams, setRecentStreams] = useState<StreamingHistoryItem[]>([]);
     const { toast } = useToast();
 
-    // Open streaming URL in the default browser and save to history
-    const openInBrowser = useCallback(async (
+    // Load recent streams on mount
+    useEffect(() => {
+        loadRecentStreams();
+    }, []);
+
+    const loadRecentStreams = async () => {
+        try {
+            const history = await getStreamingHistory(6);
+            setRecentStreams(history);
+        } catch (error) {
+            console.error('Failed to load recent streams:', error);
+        }
+    };
+
+    // Open streaming URL in the in-app Videasy player with progress sync
+    const openInPlayer = useCallback(async (
         url: string,
         title: string,
         tmdbId: string,
@@ -75,7 +87,7 @@ export function StreamView() {
         episode?: number
     ) => {
         try {
-            // Save to streaming history
+            // Save initial entry to streaming history
             await saveStreamingProgress(
                 tmdbId,
                 mediaType,
@@ -83,20 +95,33 @@ export function StreamView() {
                 posterPath ? `${TMDB_IMAGE_BASE}/w342${posterPath}` : undefined,
                 season,
                 episode,
-                0, // position
-                0  // duration (will be updated by player)
+                0, // position - will be updated by player
+                0  // duration - will be updated by player
             );
 
-            await open(url);
+            // Open in the in-app Videasy webview player
+            await openVideasyPlayer(
+                url,
+                tmdbId,
+                mediaType,
+                title,
+                posterPath,
+                season,
+                episode
+            );
+
             toast({
-                title: "Opening in Browser",
-                description: `Streaming "${title}" in your default browser`,
+                title: "Opening Player",
+                description: `Now streaming "${title}"`,
             });
+
+            // Refresh recent streams
+            loadRecentStreams();
         } catch (error) {
-            console.error('Failed to open browser:', error);
+            console.error('Failed to open player:', error);
             toast({
-                title: "Failed to Open Browser",
-                description: "Could not open the streaming URL in your browser",
+                title: "Failed to Open Player",
+                description: "Could not open the streaming player",
                 variant: "destructive"
             });
         }
@@ -142,32 +167,54 @@ export function StreamView() {
         setSelectedItem(item);
 
         if (item.media_type === 'tv') {
-            // For TV shows, open the episode selector first
             setIsEpisodeSelectorOpen(true);
         } else {
-            // For movies, open directly in Videasy player with all features
             const title = item.title || item.name || 'Unknown';
             const url = buildVideasyUrl('movie', item.id);
-            openInBrowser(url, title, item.id.toString(), 'movie', item.poster_path);
+            openInPlayer(url, title, item.id.toString(), 'movie', item.poster_path);
         }
-    }, [openInBrowser]);
+    }, [openInPlayer]);
 
     const handleEpisodeSelect = useCallback((season: number, episode: number) => {
         if (selectedItem) {
-            // Open TV show episode directly in Videasy player with all features
             const title = selectedItem.name || selectedItem.title || 'Unknown';
             const displayTitle = `${title} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
             const url = buildVideasyUrl('tv', selectedItem.id, season, episode);
-            openInBrowser(url, displayTitle, selectedItem.id.toString(), 'tv', selectedItem.poster_path, season, episode);
+            openInPlayer(url, displayTitle, selectedItem.id.toString(), 'tv', selectedItem.poster_path, season, episode);
         }
         setIsEpisodeSelectorOpen(false);
         setSelectedItem(null);
-    }, [selectedItem, openInBrowser]);
+    }, [selectedItem, openInPlayer]);
 
     const handleEpisodeSelectorClose = useCallback(() => {
         setIsEpisodeSelectorOpen(false);
         setSelectedItem(null);
     }, []);
+
+    const handleRecentClick = (item: StreamingHistoryItem) => {
+        const url = item.media_type === 'movie'
+            ? buildVideasyUrl('movie', parseInt(item.tmdb_id))
+            : buildVideasyUrl('tv', parseInt(item.tmdb_id), item.season || 1, item.episode || 1);
+
+        const displayTitle = item.media_type === 'tv' && item.season && item.episode
+            ? `${item.title} S${String(item.season).padStart(2, '0')}E${String(item.episode).padStart(2, '0')}`
+            : item.title;
+
+        // Extract the poster path without the full URL prefix
+        const posterPath = item.poster_path?.includes('/t/p/')
+            ? item.poster_path.split('/t/p/')[1]?.replace('w342', '').replace('w300', '')
+            : undefined;
+
+        openInPlayer(
+            url,
+            displayTitle,
+            item.tmdb_id,
+            item.media_type as 'movie' | 'tv',
+            posterPath,
+            item.season || undefined,
+            item.episode || undefined
+        );
+    };
 
     const getTitle = (item: TmdbSearchResult) => item.title || item.name || 'Unknown';
     const getYear = (item: TmdbSearchResult) => {
@@ -177,146 +224,255 @@ export function StreamView() {
 
     return (
         <>
-            <div className="h-full flex flex-col gap-6">
-                {/* Header */}
-                <div className="flex flex-col gap-4">
-                    <div className="flex items-center gap-3">
-                        <div className="p-2.5 rounded-xl bg-gradient-to-br from-violet-500 to-purple-600 shadow-[0_4px_20px_rgba(139,92,246,0.4),inset_0_1px_0_rgba(255,255,255,0.2)]">
-                            <Play className="h-6 w-6 text-white fill-white" />
+            <div className="h-full flex flex-col gap-8">
+                {/* Search Section */}
+                <div className="max-w-3xl mx-auto w-full pt-4">
+                    <div className="text-center mb-6">
+                        <div className="inline-flex items-center justify-center p-3 rounded-2xl bg-primary/10 mb-4">
+                            <Play className="w-8 h-8 text-primary fill-primary" />
                         </div>
-                        <div>
-                            <h1 className="text-2xl font-bold text-white">Stream Online</h1>
-                            <p className="text-sm text-muted-foreground">Search and stream movies & TV shows instantly</p>
-                        </div>
+                        <h2 className="text-2xl font-bold text-foreground mb-2">Stream Online</h2>
+                        <p className="text-sm text-muted-foreground">Search and stream movies & TV shows instantly</p>
                     </div>
 
                     {/* Search Bar */}
-                    <div className="relative max-w-2xl flex gap-2">
-                        <div className="relative flex-1">
-                            <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
+                    <div className="flex gap-3">
+                        <div className="search-container flex-1">
+                            <Search className="search-icon" />
                             <input
                                 type="text"
-                                placeholder="Search for movies or TV shows... (Press Enter)"
+                                placeholder="Search for movies or TV shows..."
                                 value={searchQuery}
                                 onChange={(e) => setSearchQuery(e.target.value)}
                                 onKeyDown={handleKeyDown}
-                                className="w-full pl-12 pr-4 py-3 bg-[#0a0a1a]/70 border border-white/10 rounded-xl text-white placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-all shadow-[inset_0_2px_4px_rgba(0,0,0,0.3)]"
+                                className="search-input"
+                                autoFocus
                             />
+                            {isSearching && (
+                                <Loader2 className="absolute right-4 top-1/2 -translate-y-1/2 w-5 h-5 animate-spin text-primary" />
+                            )}
                         </div>
                         <button
                             onClick={handleSearchClick}
                             disabled={!searchQuery.trim() || isSearching}
-                            className="px-6 py-3 bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-500 hover:to-purple-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-white font-medium transition-all flex items-center gap-2 shadow-[0_4px_16px_rgba(139,92,246,0.3),inset_0_1px_0_rgba(255,255,255,0.1)] hover:shadow-[0_6px_24px_rgba(139,92,246,0.4)]"
+                            className="btn-primary px-6 flex items-center gap-2"
                         >
-                            {isSearching ? (
-                                <Loader2 className="h-5 w-5 animate-spin" />
-                            ) : (
-                                <Search className="h-5 w-5" />
-                            )}
+                            <Search className="w-4 h-4" />
                             <span className="hidden sm:inline">Search</span>
                         </button>
                     </div>
                 </div>
 
-                {/* Results Grid */}
+                {/* Content Area */}
                 <div className="flex-1 overflow-auto">
-                    {!searchQuery && (
-                        <div className="flex flex-col items-center justify-center h-64 text-center">
-                            <div className="p-4 rounded-full bg-primary/10 mb-4">
-                                <Search className="h-12 w-12 text-primary/50" />
+                    {/* Initial State - Show Recent or Placeholder */}
+                    {!searchQuery && results.length === 0 && (
+                        <AnimatePresence mode="wait">
+                            {recentStreams.length > 0 ? (
+                                <motion.section
+                                    initial={{ opacity: 0 }}
+                                    animate={{ opacity: 1 }}
+                                    exit={{ opacity: 0 }}
+                                >
+                                    <div className="section-header">
+                                        <h3 className="section-title">
+                                            <Clock className="w-5 h-5 text-primary" />
+                                            Recently Streamed
+                                        </h3>
+                                    </div>
+                                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                                        {recentStreams.map((item, index) => (
+                                            <motion.div
+                                                key={item.id}
+                                                initial={{ opacity: 0, y: 20 }}
+                                                animate={{ opacity: 1, y: 0 }}
+                                                transition={{ delay: index * 0.05 }}
+                                                onClick={() => handleRecentClick(item)}
+                                                className="media-card group"
+                                            >
+                                                <div className="aspect-[2/3] relative overflow-hidden">
+                                                    {item.poster_path ? (
+                                                        <img
+                                                            src={item.poster_path}
+                                                            alt={item.title}
+                                                            className="media-card-poster"
+                                                            loading="lazy"
+                                                        />
+                                                    ) : (
+                                                        <div className="w-full h-full flex items-center justify-center bg-muted">
+                                                            {item.media_type === 'movie' ? (
+                                                                <Film className="w-10 h-10 text-muted-foreground" />
+                                                            ) : (
+                                                                <Tv className="w-10 h-10 text-muted-foreground" />
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                    <div className="media-card-overlay flex items-center justify-center">
+                                                        <div className="w-12 h-12 rounded-full bg-primary flex items-center justify-center">
+                                                            <Play className="w-5 h-5 text-white fill-white ml-0.5" />
+                                                        </div>
+                                                    </div>
+                                                    {/* Badge */}
+                                                    <div className={cn(
+                                                        "absolute top-2 right-2 p-1 rounded-md",
+                                                        item.media_type === 'movie'
+                                                            ? "bg-blue-500"
+                                                            : "bg-primary"
+                                                    )}>
+                                                        {item.media_type === 'movie' ? (
+                                                            <Film className="w-3 h-3 text-white" />
+                                                        ) : (
+                                                            <Tv className="w-3 h-3 text-white" />
+                                                        )}
+                                                    </div>
+                                                </div>
+                                                <div className="p-2">
+                                                    <h4 className="font-medium text-sm text-foreground line-clamp-1">{item.title}</h4>
+                                                    {item.media_type === 'tv' && item.season && item.episode && (
+                                                        <p className="text-xs text-muted-foreground">
+                                                            S{item.season} E{item.episode}
+                                                        </p>
+                                                    )}
+                                                </div>
+                                            </motion.div>
+                                        ))}
+                                    </div>
+                                </motion.section>
+                            ) : (
+                                <motion.div
+                                    initial={{ opacity: 0 }}
+                                    animate={{ opacity: 1 }}
+                                    exit={{ opacity: 0 }}
+                                    className="empty-state"
+                                >
+                                    <div className="empty-state-icon">
+                                        <TrendingUp className="w-12 h-12 text-muted-foreground" />
+                                    </div>
+                                    <h3 className="empty-state-title">Search for Content</h3>
+                                    <p className="empty-state-description">
+                                        Enter a movie or TV show title above to search and start streaming
+                                    </p>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+                    )}
+
+                    {/* No Results */}
+                    {searchQuery && results.length === 0 && !isSearching && (
+                        <div className="empty-state">
+                            <div className="empty-state-icon">
+                                <Search className="w-12 h-12 text-muted-foreground" />
                             </div>
-                            <h3 className="text-lg font-medium text-white mb-2">Search for Content</h3>
-                            <p className="text-sm text-muted-foreground max-w-md">
-                                Enter a movie or TV show title above to search TMDB and start streaming via Videasy
+                            <h3 className="empty-state-title">No results found</h3>
+                            <p className="empty-state-description">
+                                No results for "{searchQuery}". Try a different search term.
                             </p>
                         </div>
                     )}
 
-                    {searchQuery && results.length === 0 && !isSearching && (
-                        <div className="flex flex-col items-center justify-center h-64 text-center">
-                            <p className="text-muted-foreground">No results found for "{searchQuery}"</p>
-                        </div>
-                    )}
-
+                    {/* Search Results */}
                     <AnimatePresence mode="popLayout">
-                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-                            {results.map((item, index) => (
-                                <motion.div
-                                    key={item.id}
-                                    initial={{ opacity: 0, y: 20 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    exit={{ opacity: 0, scale: 0.9 }}
-                                    transition={{ delay: index * 0.03 }}
-                                    className="group relative aspect-[2/3] rounded-2xl overflow-hidden cursor-pointer bg-gradient-to-b from-[#0f0d1a]/90 to-[#080610] border border-white/[0.06] hover:border-violet-500/40 transition-all duration-300 shadow-[0_4px_20px_rgba(0,0,0,0.4)] hover:shadow-[0_8px_30px_rgba(139,92,246,0.15),0_20px_40px_rgba(0,0,0,0.4)]"
-                                    onClick={() => handlePlayClick(item)}
-                                >
-                                    {/* Poster */}
-                                    {item.poster_path ? (
-                                        <img
-                                            src={`${TMDB_IMAGE_BASE}/w342${item.poster_path}`}
-                                            alt={getTitle(item)}
-                                            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
-                                            loading="lazy"
-                                        />
-                                    ) : (
-                                        <div className="w-full h-full flex items-center justify-center bg-secondary/50">
-                                            {item.media_type === 'movie' ? (
-                                                <Film className="h-12 w-12 text-muted-foreground/50" />
-                                            ) : (
-                                                <Tv className="h-12 w-12 text-muted-foreground/50" />
-                                            )}
-                                        </div>
-                                    )}
+                        {results.length > 0 && (
+                            <motion.div
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                exit={{ opacity: 0 }}
+                            >
+                                <div className="section-header">
+                                    <h3 className="section-title">
+                                        Results ({results.length})
+                                    </h3>
+                                </div>
+                                <div className="grid-media">
+                                    {results.map((item, index) => (
+                                        <motion.div
+                                            key={item.id}
+                                            initial={{ opacity: 0, y: 20 }}
+                                            animate={{ opacity: 1, y: 0 }}
+                                            exit={{ opacity: 0, scale: 0.95 }}
+                                            transition={{ delay: index * 0.03 }}
+                                            className="media-card group"
+                                            onClick={() => handlePlayClick(item)}
+                                        >
+                                            {/* Poster */}
+                                            <div className="aspect-[2/3] relative overflow-hidden">
+                                                {item.poster_path ? (
+                                                    <img
+                                                        src={`${TMDB_IMAGE_BASE}/w342${item.poster_path}`}
+                                                        alt={getTitle(item)}
+                                                        className="media-card-poster"
+                                                        loading="lazy"
+                                                    />
+                                                ) : (
+                                                    <div className="w-full h-full flex items-center justify-center bg-muted">
+                                                        {item.media_type === 'movie' ? (
+                                                            <Film className="w-12 h-12 text-muted-foreground" />
+                                                        ) : (
+                                                            <Tv className="w-12 h-12 text-muted-foreground" />
+                                                        )}
+                                                    </div>
+                                                )}
 
-                                    {/* Hover Overlay with matching colors */}
-                                    <div className="absolute inset-0 bg-gradient-to-t from-[#0a0a1a] via-[#0a0a1a]/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-3">
-                                        <div className="flex items-center gap-2 mb-2">
-                                            <div className={`px-2 py-0.5 rounded text-xs font-bold uppercase ${item.media_type === 'movie'
-                                                ? 'bg-blue-500/80 text-white'
-                                                : 'bg-purple-500/80 text-white'
-                                                }`}>
-                                                {item.media_type}
-                                            </div>
-                                            {item.vote_average && item.vote_average > 0 && (
-                                                <div className="flex items-center gap-1 text-xs text-yellow-400">
-                                                    <Star className="h-3 w-3 fill-yellow-400" />
-                                                    {item.vote_average.toFixed(1)}
+                                                {/* Overlay */}
+                                                <div className="media-card-overlay flex flex-col justify-end p-3">
+                                                    {/* Rating & Type */}
+                                                    <div className="flex items-center gap-2 mb-2">
+                                                        <span className={cn(
+                                                            "px-2 py-0.5 rounded text-xs font-bold uppercase",
+                                                            item.media_type === 'movie'
+                                                                ? 'bg-blue-500 text-white'
+                                                                : 'bg-primary text-white'
+                                                        )}>
+                                                            {item.media_type}
+                                                        </span>
+                                                        {item.vote_average && item.vote_average > 0 && (
+                                                            <div className="flex items-center gap-1 text-xs text-yellow-400">
+                                                                <Star className="w-3 h-3 fill-yellow-400" />
+                                                                {item.vote_average.toFixed(1)}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                    <h4 className="text-sm font-semibold text-white line-clamp-2">{getTitle(item)}</h4>
+                                                    {getYear(item) && (
+                                                        <p className="text-xs text-white/70">{getYear(item)}</p>
+                                                    )}
                                                 </div>
-                                            )}
-                                        </div>
-                                        <h3 className="text-sm font-semibold text-white line-clamp-2">{getTitle(item)}</h3>
-                                        {getYear(item) && (
-                                            <p className="text-xs text-white/70">{getYear(item)}</p>
-                                        )}
-                                    </div>
 
-                                    {/* Play button on hover with 3D depth */}
-                                    <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-                                        <div className="relative">
-                                            <div className="absolute inset-0 rounded-full bg-violet-500/50 blur-xl scale-150" />
-                                            <div className="absolute inset-0 rounded-full bg-black/50 translate-y-2 blur-lg scale-95" />
-                                            <div className="relative p-4 rounded-full bg-gradient-to-br from-violet-400 via-violet-500 to-purple-600 shadow-[0_4px_20px_rgba(139,92,246,0.5),inset_0_1px_0_rgba(255,255,255,0.3)] transform scale-75 group-hover:scale-100 transition-transform duration-300">
-                                                <Play className="h-8 w-8 text-white fill-white drop-shadow-lg" />
+                                                {/* Play button */}
+                                                <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                                                    <div className="relative">
+                                                        <div className="absolute inset-0 rounded-full bg-primary/30 blur-xl scale-150" />
+                                                        <div className="relative w-14 h-14 rounded-full bg-primary flex items-center justify-center shadow-elevation-2">
+                                                            <Play className="w-6 h-6 text-white fill-white ml-0.5" />
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                {/* Type badge (always visible) */}
+                                                <div className={cn(
+                                                    "absolute top-2 right-2 p-1.5 rounded-lg",
+                                                    item.media_type === 'movie'
+                                                        ? 'bg-blue-500'
+                                                        : 'bg-primary'
+                                                )}>
+                                                    {item.media_type === 'movie' ? (
+                                                        <Film className="w-3 h-3 text-white" />
+                                                    ) : (
+                                                        <Tv className="w-3 h-3 text-white" />
+                                                    )}
+                                                </div>
                                             </div>
-                                        </div>
-                                    </div>
 
-                                    {/* Media type badge (always visible) with 3D effect */}
-                                    <div className="absolute top-2 right-2">
-                                        <div className={`p-1.5 rounded-lg shadow-[0_2px_8px_rgba(0,0,0,0.3)] ${item.media_type === 'movie'
-                                            ? 'bg-gradient-to-br from-blue-400 to-blue-600'
-                                            : 'bg-gradient-to-br from-violet-400 to-purple-600'
-                                            }`}>
-                                            {item.media_type === 'movie' ? (
-                                                <Film className="h-3 w-3 text-white drop-shadow" />
-                                            ) : (
-                                                <Tv className="h-3 w-3 text-white drop-shadow" />
-                                            )}
-                                        </div>
-                                    </div>
-                                </motion.div>
-                            ))}
-                        </div>
+                                            {/* Info below card */}
+                                            <div className="p-2">
+                                                <h4 className="font-medium text-sm text-foreground line-clamp-1">{getTitle(item)}</h4>
+                                                <p className="text-xs text-muted-foreground">{getYear(item) || 'Unknown year'}</p>
+                                            </div>
+                                        </motion.div>
+                                    ))}
+                                </div>
+                            </motion.div>
+                        )}
                     </AnimatePresence>
                 </div>
             </div>
@@ -332,7 +488,6 @@ export function StreamView() {
                     onClose={handleEpisodeSelectorClose}
                 />
             )}
-
         </>
     );
 }
