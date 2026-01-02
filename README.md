@@ -1,74 +1,147 @@
 # Slasshy Desktop
 
-A modern, high-performance media indexer and player built with **Tauri**, **Rust**, and **React**. Slasshy Desktop organizes your local video library into a beautiful, browsable interface and plays your content seamlessly using the power of **MPV**.
+A modern, high-performance media library manager built with **Tauri**, **Rust**, and **React**. Automatically indexes your local video collection, fetches rich metadata from TMDB, and provides seamless playback through **MPV**.
 
-![Slasshy Desktop Banner](https://via.placeholder.com/800x400?text=Slasshy+Desktop+Interface)
+## Features
 
-## ✨ Key Features
+### Library Management
+- **Automatic Indexing** - Scans your media folders and organizes Movies & TV Shows automatically
+- **Smart File Watcher** - Detects new files in real-time and indexes them instantly (toggleable)
+- **Incremental Updates** - Only indexes new content, skips already-indexed files
+- **Orphan Cleanup** - Automatically removes entries for deleted files
 
-- **Unified Media Library:** Automatically scans your directories to organize Movies and TV Shows.
-- **Smart Metadata:** Fetches high-quality metadata, posters, and backdrops from TMDB.
-- **Native Playback Power:** Integrates with **MPV** to play virtually any video format (MKV, AVI, HDR, etc.) without transcoding.
-- **Resume Playback:** Remembers exactly where you left off, even for local files played in MPV.
-- **Watch History:** Keep track of what you've watched.
-- **Modern UI:** A sleek, responsive interface featuring dark mode, glassmorphism, and smooth animations.
-- **Metadata Editor:** "Fix Match" feature to manually correct incorrect associations.
+### Metadata & Organization
+- **TMDB Integration** - Fetches posters, backdrops, overviews, and ratings
+- **TV Show Support** - Properly groups episodes by series and season with episode thumbnails
+- **Fix Match** - Manually correct misidentified media
+- **Episode Browser** - Browse seasons and episodes with full metadata
 
-## 🛠️ Tech Stack
+### Playback
+- **MPV Integration** - Native playback of any format (MKV, MP4, AVI, HDR, etc.) without transcoding
+- **Resume Playback** - Remembers your position across all media
+- **Watch History** - Track what you've watched
+- **Streaming Support** - Built-in Videasy player for online content
 
-- **Frontend:** React, TypeScript, TailwindCSS, Radix UI
-- **Backend (Desktop):** Rust (Tauri), SQLite (Rusqlite)
-- **Playback Engine:** MPV (via IPC)
-- **Data Source:** The Movie Database (TMDB)
+### User Experience
+- **Modern UI** - Clean interface with glassmorphism and smooth animations
+- **System Tray** - Runs in background with Windows notifications for new content
+- **Onboarding** - Guided setup for first-time users
+- **Context Menus** - Right-click actions for quick operations
 
-## 📋 Prerequisites
+## Tech Stack
 
-Before running the application, ensure you have the following installed:
+| Layer | Technology |
+|-------|------------|
+| Frontend | React 18, TypeScript, TailwindCSS, Radix UI, Framer Motion |
+| Backend | Rust, Tauri |
+| Database | SQLite (rusqlite) |
+| Playback | MPV (via IPC) |
+| Metadata | TMDB API |
 
-1.  **Node.js** (v18 or higher)
-2.  **Rust** (latest stable)
-3.  **MPV Media Player:**
-    -   **Windows:** Download a build (e.g., from [non-suckless builds](https://sourceforge.net/projects/mpv-player-windows/files/)) and add the folder containing `mpv.exe` to your system `PATH`.
-    -   **Linux/macOS:** Install via your package manager (e.g., `apt install mpv` or `brew install mpv`).
+## Supported Formats
 
-## 🚀 Getting Started
+`.mkv` `.mp4` `.avi` `.mov` `.webm` `.m4v` `.wmv` `.flv` `.ts` `.m2ts`
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/SlasshyOverhere/slasshy-indexer.git
-    cd slasshy-indexer/slasshy-desktop
-    ```
+## Prerequisites
 
-2.  **Install Frontend Dependencies:**
-    ```bash
-    npm install
-    ```
+1. **Node.js** v18+
+2. **Rust** (latest stable)
+3. **MPV Media Player**
+   - **Windows:** Download from [mpv.io](https://mpv.io/installation/) or [SourceForge builds](https://sourceforge.net/projects/mpv-player-windows/files/) and add to system `PATH`
+   - **Linux:** `sudo apt install mpv` or equivalent
+   - **macOS:** `brew install mpv`
 
-3.  **Run in Development Mode:**
-    ```bash
-    npm run tauri dev
-    ```
-    This will compile the Rust backend and launch the application window.
-
-## 📦 Building for Production
-
-To create an optimized executable for your operating system:
+## Installation
 
 ```bash
+# Clone the repository
+git clone https://github.com/YourUsername/slasshy-desktop.git
+cd slasshy-desktop
+
+# Install dependencies
+npm install
+
+# Run in development mode
+npm run tauri dev
+```
+
+## Building
+
+```bash
+# Create production build
 npm run tauri build
 ```
 
-The build artifacts will be located in `src-tauri/target/release/`.
+Build output: `src-tauri/target/release/`
 
-## ⚙️ Configuration
+Installers will be generated in `src-tauri/target/release/bundle/`
 
--   **Settings:** Access the settings menu from the sidebar to manage library paths and player preferences.
--   **Themes:** Toggle between Light and Dark modes.
+## Configuration
 
-## 🤝 Contributing
+### First Launch
+1. Complete the onboarding wizard
+2. Add your media folders (Movies, TV Shows)
+3. Enter your TMDB API key (optional, for metadata)
+4. Click "Scan Library" to index your content
+
+### Settings
+- **Media Folders** - Add/remove directories to scan
+- **TMDB API Key** - Required for poster and metadata fetching
+- **Auto Indexer** - Toggle real-time file watching
+- **Player Preferences** - Configure MPV behavior
+
+### Getting a TMDB API Key
+1. Create an account at [themoviedb.org](https://www.themoviedb.org/)
+2. Go to Settings > API
+3. Request an API key (free for personal use)
+4. Copy the "API Read Access Token" into Slasshy settings
+
+## Project Structure
+
+```
+slasshy-desktop/
+├── src/                    # React frontend
+│   ├── components/         # UI components
+│   ├── services/           # API & utility functions
+│   └── App.tsx            # Main application
+├── src-tauri/             # Rust backend
+│   ├── src/
+│   │   ├── main.rs        # Tauri commands & app logic
+│   │   ├── database.rs    # SQLite operations
+│   │   ├── media_manager.rs # Scanning & indexing
+│   │   ├── watcher.rs     # File system watcher
+│   │   ├── tmdb.rs        # TMDB API client
+│   │   └── mpv_ipc.rs     # MPV player control
+│   └── tauri.conf.json    # Tauri configuration
+└── package.json
+```
+
+## How It Works
+
+1. **Scanning** - Walks through configured media folders finding video files
+2. **Parsing** - Extracts title, year, season/episode from filenames
+3. **Metadata Fetch** - Queries TMDB for rich metadata and downloads images
+4. **Database Storage** - Stores everything in local SQLite for fast access
+5. **Duplicate Detection** - Uses normalized path comparison to skip already-indexed content
+6. **Playback** - Launches MPV with IPC for progress tracking and resume support
+
+## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
-## 📄 License
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## License
 
 [MIT License](LICENSE)
+
+## Acknowledgments
+
+- [Tauri](https://tauri.app/) - Desktop app framework
+- [MPV](https://mpv.io/) - Media player
+- [TMDB](https://www.themoviedb.org/) - Metadata provider
+- [Radix UI](https://www.radix-ui.com/) - UI primitives
