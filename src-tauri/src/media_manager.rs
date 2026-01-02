@@ -10,7 +10,12 @@ use crate::config::Config;
 use crate::database::Database;
 use crate::tmdb;
 
-const VIDEO_EXTENSIONS: &[&str] = &[".mkv", ".mp4", ".avi", ".mov", ".webm", ".m4v", ".wmv", ".flv"];
+const VIDEO_EXTENSIONS: &[&str] = &[".mkv", ".mp4", ".avi", ".mov", ".webm", ".m4v", ".wmv", ".flv", ".ts", ".m2ts"];
+
+/// Normalize file paths for consistent comparison (handles Windows path inconsistencies)
+fn normalize_path(path: &str) -> String {
+    path.to_lowercase().replace('\\', "/")
+}
 
 #[derive(Debug, Clone)]
 pub struct ParsedMedia {
@@ -256,16 +261,17 @@ pub fn scan_media_folders_with_events(
     println!("[SCAN] Phase 2: Checking for already indexed files...");
     let start_filter = std::time::Instant::now();
 
-    // Get all existing file paths from DB (single query is faster than individual checks)
+    // Get all existing file paths from DB and normalize them for consistent comparison
     let existing_paths: std::collections::HashSet<String> = db.get_all_file_paths()
         .unwrap_or_default()
         .into_iter()
+        .map(|p| normalize_path(&p))
         .collect();
 
     let new_files: Vec<PathBuf> = all_video_files
         .into_par_iter()
         .filter(|path| {
-            let path_str = path.to_string_lossy().to_string();
+            let path_str = normalize_path(&path.to_string_lossy());
             !existing_paths.contains(&path_str)
         })
         .collect();
