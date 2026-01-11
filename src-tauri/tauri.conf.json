@@ -102,7 +102,12 @@
       "csp": "default-src 'self'; img-src 'self' asset: https: data:; media-src 'self' asset: blob: https: http://localhost:* http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; frame-src https://player.videasy.net https://*.videasy.net; child-src https://player.videasy.net https://*.videasy.net; script-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss: http://localhost:* http://127.0.0.1:*"
     },
     "updater": {
-      "active": false
+      "active": true,
+      "endpoints": [
+        "https://github.com/SlasshyOverhere/StreamVault/releases/latest/download/latest.json"
+      ],
+      "dialog": true,
+      "pubkey": "RWRqntTEBUKN3EIg2dFgrMIiox/Tn11HiqqQeEZ5clccpJwrnahmgSyu"
     },
     "systemTray": {
       "iconPath": "icons/icon.png",

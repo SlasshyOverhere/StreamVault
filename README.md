@@ -62,8 +62,8 @@ A modern, high-performance media library manager built with **Tauri**, **Rust**,
 
 ```bash
 # Clone the repository
-git clone https://github.com/SlasshyOverhere/streamvault.git
-cd streamvault
+git clone https://github.com/SlasshyOverhere/StreamVault.git
+cd StreamVault
 
 # Install dependencies
 npm install

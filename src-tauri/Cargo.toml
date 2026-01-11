@@ -4,7 +4,7 @@ version = "3.0.0"
 description = "A Tauri Media Library App"
 authors = ["Suman Patgiri"]
 license = ""
-repository = "https://github.com/SlasshyOverhere/slasshy-indexer"
+repository = "https://github.com/SlasshyOverhere/StreamVault"
 edition = "2021"
 
 [build-dependencies]

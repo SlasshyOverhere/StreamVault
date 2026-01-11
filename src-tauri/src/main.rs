@@ -3813,7 +3813,7 @@ struct GitHubAsset {
 #[tauri::command]
 async fn check_for_updates() -> Result<UpdateInfo, String> {
     let current_version = env!("CARGO_PKG_VERSION");
-    let repo = "SlasshyOverhere/streamvault";
+    let repo = "SlasshyOverhere/StreamVault";
 
     println!("[UPDATE] Checking for updates... Current version: {}", current_version);
 
