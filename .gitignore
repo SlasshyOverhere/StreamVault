@@ -73,3 +73,9 @@ coverage/
 *.pem
 *.key
 *.cert
+
+# Markdown files (block all except specific ones)
+*.md
+!README.md
+!CLAUDE.md
+!CHANGELOG*.md
