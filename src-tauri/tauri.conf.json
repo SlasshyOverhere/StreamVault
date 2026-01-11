@@ -8,7 +8,7 @@
   },
   "package": {
     "productName": "StreamVault",
-    "version": "3.0.0"
+    "version": "3.0.1"
   },
   "tauri": {
     "allowlist": {
@@ -107,7 +107,7 @@
         "https://github.com/SlasshyOverhere/StreamVault/releases/latest/download/latest.json"
       ],
       "dialog": true,
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEEwMTQ2RkNBQkY0RThEMEIKUldRTGpVNi95bThVb0tibzdHMVhGQ2FHQ1NTS0twSU4rYkZ5SWRuRzViaCtjMDZ4V1M4bUJxSnEK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRDQ0I5Mjk5NjFBQjU5MzEKUldReFdhdGhtWkxMVENNT1FNbWhZT0VUVmlJaEREdkR2akRGdFhFVDFHRWZIMnlUQ0JQSUtPN0UK"
     },
     "systemTray": {
       "iconPath": "icons/icon.png",
