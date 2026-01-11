@@ -2,17 +2,22 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 // Constants for retry logic
 const MAX_RETRIES: u32 = 5;
 const BASE_DELAY_MS: u64 = 500;
 const MAX_DELAY_MS: u64 = 10000;
 
-// Default TMDB access token - loaded from build-time environment variable
+// Encoded TMDB access token (base64) - decode at runtime
 // This is a read-only token for fetching public movie/TV metadata
+const ENCODED_TMDB_TOKEN: &str = "ZXlKaGJHY2lPaUpJVXpJMU5pSjkuZXlKaGRXUWlPaUptTVRNNFpqVTFZbVJsWkRnMFpUUmhORFpqTUdaa1kyRXpaV0ZrTkRBNU5DSXNJbTVpWmlJNk1UYzJOelUwT1RjME1pNDNOVGNzSW5OMVlpSTZJalk1TldGaFlqSmxNbVZsT0dKbU9XWXhOalJoWkdJeVlTSXNJbk5qYjNCbGN5STZXeUpoY0dsZmNtVmhaQ0pkTENKMlpYSnphVzl1SWpveGZRLmtwY3dDdkdBb2Q0NDdOR3FGbVRxQ3NSNEtZTVFNd2Rzb0YyRlVZcno1N0E=";
+
+// Decode the TMDB token at runtime
 fn get_default_tmdb_token() -> String {
-    option_env!("TMDB_ACCESS_TOKEN")
-        .map(|s| s.to_string())
+    BASE64.decode(ENCODED_TMDB_TOKEN)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
         .unwrap_or_default()
 }
 
