@@ -260,25 +260,14 @@ async fn gdrive_start_auth() -> Result<String, String> {
 }
 
 /// Wait for OAuth callback and complete authentication
-/// In dev mode: Uses localhost callback server
-/// In prod mode: Waits for deep link callback
+/// The backend handles token exchange and sends tokens directly to localhost callback
 #[tauri::command]
 async fn gdrive_complete_auth(state: State<'_, AppState>) -> Result<gdrive::DriveAccountInfo, String> {
     println!("[GDRIVE] Waiting for OAuth callback...");
 
-    let code = {
-        // Always use localhost callback server for simplicity and reliability
-        // This avoids deep link registration issues on Windows and provides a better UX
-        // than manual code copying.
-        println!("[GDRIVE] Starting localhost callback server...");
-        gdrive::wait_for_oauth_callback().await?
-    };
-
-    println!("[GDRIVE] Received authorization code");
-
-    // Exchange code for tokens
-    let tokens = gdrive::exchange_code_for_tokens(&code).await?;
-    println!("[GDRIVE] Token exchange successful");
+    // Wait for tokens from backend (it redirects to localhost with tokens)
+    let tokens = gdrive::wait_for_oauth_callback().await?;
+    println!("[GDRIVE] Received tokens from backend");
 
     // Store tokens
     state.gdrive_client.store_tokens(tokens)?;
@@ -298,31 +287,13 @@ async fn gdrive_disconnect(state: State<'_, AppState>) -> Result<ApiResponse, St
 }
 
 /// Complete OAuth with manually entered authorization code
-/// Used when the user copies the code from the external callback page
+/// NOTE: This is deprecated. The new flow uses backend proxy which handles token exchange.
 #[tauri::command]
 async fn gdrive_auth_with_code(
-    state: State<'_, AppState>,
-    code: String,
+    _state: State<'_, AppState>,
+    _code: String,
 ) -> Result<gdrive::DriveAccountInfo, String> {
-    println!("[GDRIVE] Completing auth with manual code...");
-
-    // Trim any whitespace from the code
-    let code = code.trim();
-
-    if code.is_empty() {
-        return Err("Authorization code is empty".to_string());
-    }
-
-    // Exchange code for tokens
-    let tokens = gdrive::exchange_code_for_tokens(code).await?;
-    println!("[GDRIVE] Token exchange successful");
-
-    // Store tokens
-    state.gdrive_client.store_tokens(tokens)?;
-    println!("[GDRIVE] Tokens stored successfully");
-
-    // Get and return account info
-    state.gdrive_client.get_account_info().await
+    Err("Manual code entry is no longer supported. Please use the 'Connect Google Drive' button which opens the browser for authentication.".to_string())
 }
 
 /// List folders in Google Drive

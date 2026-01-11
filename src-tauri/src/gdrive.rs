@@ -1,6 +1,7 @@
 //! Google Drive integration module
 //! Handles OAuth2 authentication and Google Drive API operations
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -11,60 +12,12 @@ use std::sync::{Arc, Mutex};
 
 use crate::database::get_app_data_dir;
 
-// Google OAuth2 configuration
-// To set up:
-// 1. Go to https://console.cloud.google.com/
-// 2. Create a new project or select existing
-// 3. Enable "Google Drive API"
-// 4. Go to "Credentials" > "Create Credentials" > "OAuth client ID"
-// 5. Choose "Desktop app" as application type
-// 6. Copy Client ID and Client Secret below
-//
-// For development/testing, you can use these placeholder values
-// and replace them with your own credentials
-
-// Read from environment or use defaults for development
-fn get_client_id() -> String {
-    std::env::var("GDRIVE_CLIENT_ID")
-        .ok()
-        .or_else(|| option_env!("GDRIVE_CLIENT_ID").map(|s| s.to_string()))
-        .unwrap_or_else(|| {
-            // Default: You need to replace this with your actual client ID
-            "YOUR_CLIENT_ID.apps.googleusercontent.com".to_string()
-        })
-}
-
-fn get_client_secret() -> String {
-    std::env::var("GDRIVE_CLIENT_SECRET")
-        .ok()
-        .or_else(|| option_env!("GDRIVE_CLIENT_SECRET").map(|s| s.to_string()))
-        .unwrap_or_else(|| {
-            // Default: You need to replace this with your actual client secret
-            "YOUR_CLIENT_SECRET".to_string()
-        })
-}
-
-// Production redirect URI - configurable via environment variable
-// Default: https://indexer-oauth-callback.vercel.app/
-// Production redirect URI
-// We use localhost callback for both Dev and Prod for a seamless experience.
-// This requires the user to add "http://localhost:8085/callback" to their
-// Google Cloud Console "Authorized redirect URIs".
-fn get_redirect_uri() -> String {
-    "http://localhost:8085/callback".to_string()
-}
-
-// Check if we're in development mode
-pub fn is_dev_mode() -> bool {
-    std::env::var("STREAMVAULT_DEV").is_ok() || cfg!(debug_assertions)
-}
-const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
-const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+// Backend auth server URL (handles OAuth securely)
+// This keeps client_id and client_secret on the server
+const AUTH_SERVER_URL: &str = "https://streamvault-backend-server.onrender.com";
 
 // Google Drive API
 const DRIVE_API_BASE: &str = "https://www.googleapis.com/drive/v3";
-// Full drive access to allow file deletion
-const DRIVE_SCOPES: &str = "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile";
 
 /// Stored OAuth tokens
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,21 +124,13 @@ impl GoogleDriveClient {
         }
     }
 
-    /// Refresh the access token
+    /// Refresh the access token via backend proxy
     async fn refresh_access_token(&self, refresh_token: &str) -> Result<String, String> {
-        let client_id = get_client_id();
-        let client_secret = get_client_secret();
-
-        let params = [
-            ("client_id", client_id.as_str()),
-            ("client_secret", client_secret.as_str()),
-            ("refresh_token", refresh_token),
-            ("grant_type", "refresh_token"),
-        ];
-
         let response = self.http_client
-            .post(TOKEN_URL)
-            .form(&params)
+            .post(format!("{}/auth/refresh", AUTH_SERVER_URL))
+            .json(&serde_json::json!({
+                "refresh_token": refresh_token
+            }))
             .send()
             .await
             .map_err(|e| format!("Failed to refresh token: {}", e))?;
@@ -620,23 +565,74 @@ impl GoogleDriveClient {
 
 // ==================== OAuth Flow ====================
 
-/// Generate the OAuth authorization URL
+/// Generate the OAuth authorization URL (via backend proxy)
 pub fn get_auth_url() -> String {
-    let state = generate_state();
-    let client_id = get_client_id();
-    let redirect_uri = get_redirect_uri();
-    format!(
-        "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent&state={}",
-        AUTH_URL,
-        client_id,
-        urlencoding::encode(&redirect_uri),
-        urlencoding::encode(DRIVE_SCOPES),
-        state
-    )
+    format!("{}/auth/google", AUTH_SERVER_URL)
 }
 
-/// Start local OAuth callback server and wait for authorization code
-pub async fn wait_for_oauth_callback() -> Result<String, String> {
+/// Parse tokens from deep link callback URL
+/// The backend sends tokens via: streamvault://oauth/callback?tokens=BASE64_ENCODED_JSON
+pub fn parse_tokens_from_callback(url: &str) -> Result<GoogleTokens, String> {
+    // Parse the URL to get the tokens parameter
+    let url_parts: Vec<&str> = url.split('?').collect();
+    if url_parts.len() < 2 {
+        return Err("No query string in callback URL".to_string());
+    }
+
+    let query = url_parts[1];
+    let params: HashMap<&str, &str> = query
+        .split('&')
+        .filter_map(|pair| {
+            let mut parts = pair.splitn(2, '=');
+            Some((parts.next()?, parts.next()?))
+        })
+        .collect();
+
+    // Check for error
+    if let Some(error) = params.get("error") {
+        return Err(format!("OAuth error: {}", error));
+    }
+
+    // Get and decode the tokens
+    let tokens_b64 = params.get("tokens")
+        .ok_or("No tokens in callback URL")?;
+
+    let tokens_json = String::from_utf8(
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, tokens_b64)
+            .map_err(|e| format!("Failed to decode tokens: {}", e))?
+    ).map_err(|e| format!("Invalid UTF-8 in tokens: {}", e))?;
+
+    let token_data: serde_json::Value = serde_json::from_str(&tokens_json)
+        .map_err(|e| format!("Failed to parse tokens JSON: {}", e))?;
+
+    let access_token = token_data["access_token"]
+        .as_str()
+        .ok_or("Missing access_token")?
+        .to_string();
+
+    let refresh_token = token_data["refresh_token"]
+        .as_str()
+        .map(String::from);
+
+    let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
+    let expires_at = chrono::Utc::now().timestamp() + expires_in;
+
+    let token_type = token_data["token_type"]
+        .as_str()
+        .unwrap_or("Bearer")
+        .to_string();
+
+    Ok(GoogleTokens {
+        access_token,
+        refresh_token,
+        expires_at: Some(expires_at),
+        token_type,
+    })
+}
+
+/// Start local OAuth callback server and wait for tokens from backend
+/// The backend exchanges the code and redirects here with tokens directly
+pub async fn wait_for_oauth_callback() -> Result<GoogleTokens, String> {
     // Start a local TCP listener on the redirect URI port
     let listener = TcpListener::bind("127.0.0.1:8085")
         .map_err(|e| format!("Failed to start OAuth callback server: {}", e))?;
@@ -661,8 +657,8 @@ pub async fn wait_for_oauth_callback() -> Result<String, String> {
 
     println!("[GDRIVE] Received callback: {}", request_line);
 
-    // Parse the authorization code from the URL
-    let code = extract_auth_code(&request_line)?;
+    // Parse the request to get tokens or error
+    let tokens = extract_tokens_from_request(&request_line)?;
 
     // Send a success response
     let response_body = r#"
@@ -698,54 +694,72 @@ pub async fn wait_for_oauth_callback() -> Result<String, String> {
     stream.write_all(response.as_bytes()).ok();
     stream.flush().ok();
 
-    Ok(code)
+    Ok(tokens)
 }
 
-/// Exchange authorization code for tokens
-pub async fn exchange_code_for_tokens(code: &str) -> Result<GoogleTokens, String> {
-    let client = reqwest::Client::new();
-    let client_id = get_client_id();
-    let client_secret = get_client_secret();
-    let redirect_uri = get_redirect_uri();
-
-    let params = [
-        ("client_id", client_id.as_str()),
-        ("client_secret", client_secret.as_str()),
-        ("code", code),
-        ("grant_type", "authorization_code"),
-        ("redirect_uri", redirect_uri.as_str()),
-    ];
-
-    let response = client
-        .post(TOKEN_URL)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to exchange code: {}", e))?;
-
-    if !response.status().is_success() {
-        let error_text = response.text().await.unwrap_or_default();
-        return Err(format!("Token exchange failed: {}", error_text));
+/// Extract tokens from callback request
+fn extract_tokens_from_request(request_line: &str) -> Result<GoogleTokens, String> {
+    // Parse: GET /callback?tokens=BASE64_DATA HTTP/1.1
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
+    if parts.len() < 2 {
+        return Err("Invalid request line".to_string());
     }
 
-    let token_response: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse token response: {}", e))?;
+    let path = parts[1];
 
-    let access_token = token_response["access_token"]
+    // Check for error
+    if path.contains("error=") {
+        let query_start = path.find('?').ok_or("No query string")?;
+        let query = &path[query_start + 1..];
+        let params: HashMap<&str, &str> = query
+            .split('&')
+            .filter_map(|pair| {
+                let mut parts = pair.splitn(2, '=');
+                Some((parts.next()?, parts.next()?))
+            })
+            .collect();
+
+        let error = params.get("error").unwrap_or(&"unknown_error");
+        return Err(format!("OAuth error: {}", error));
+    }
+
+    // Parse query parameters
+    let query_start = path.find('?').ok_or("No query string in callback URL")?;
+    let query = &path[query_start + 1..];
+
+    let params: HashMap<&str, &str> = query
+        .split('&')
+        .filter_map(|pair| {
+            let mut parts = pair.splitn(2, '=');
+            Some((parts.next()?, parts.next()?))
+        })
+        .collect();
+
+    // Get and decode the tokens
+    let tokens_b64 = params.get("tokens")
+        .ok_or("No tokens in callback URL")?;
+
+    let tokens_json = String::from_utf8(
+        base64::engine::general_purpose::STANDARD.decode(tokens_b64)
+            .map_err(|e| format!("Failed to decode tokens: {}", e))?
+    ).map_err(|e| format!("Invalid UTF-8 in tokens: {}", e))?;
+
+    let token_data: serde_json::Value = serde_json::from_str(&tokens_json)
+        .map_err(|e| format!("Failed to parse tokens JSON: {}", e))?;
+
+    let access_token = token_data["access_token"]
         .as_str()
         .ok_or("Missing access_token")?
         .to_string();
 
-    let refresh_token = token_response["refresh_token"]
+    let refresh_token = token_data["refresh_token"]
         .as_str()
         .map(String::from);
 
-    let expires_in = token_response["expires_in"].as_i64().unwrap_or(3600);
+    let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
     let expires_at = chrono::Utc::now().timestamp() + expires_in;
 
-    let token_type = token_response["token_type"]
+    let token_type = token_data["token_type"]
         .as_str()
         .unwrap_or("Bearer")
         .to_string();
@@ -756,6 +770,15 @@ pub async fn exchange_code_for_tokens(code: &str) -> Result<GoogleTokens, String
         expires_at: Some(expires_at),
         token_type,
     })
+}
+
+/// Exchange authorization code for tokens
+/// NOTE: This function is deprecated. The new flow uses backend proxy
+/// and tokens are returned via deep link callback.
+/// Use parse_tokens_from_callback() instead.
+#[deprecated(note = "Use parse_tokens_from_callback() with the new backend proxy flow")]
+pub async fn exchange_code_for_tokens(_code: &str) -> Result<GoogleTokens, String> {
+    Err("This function is deprecated. Tokens are now received via deep link callback from the backend proxy. Use parse_tokens_from_callback() to parse tokens from the callback URL.".to_string())
 }
 
 // ==================== Helpers ====================
