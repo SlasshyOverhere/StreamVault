@@ -1,6 +1,5 @@
-import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Sparkles, CheckCircle, Layout, Monitor, Bug, Bell, Palette, Lock, List, MousePointer, AppWindow } from 'lucide-react'
+import { X, Sparkles, CheckCircle, Layout, Monitor, Bug, Bell, Palette, Lock, List, AppWindow } from 'lucide-react'
 
 const CURRENT_VERSION = '3.0.4'
 
