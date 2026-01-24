@@ -1216,13 +1216,20 @@ async fn check_cloud_changes(
 
         // Send Windows notification for each item (simple format)
         for title in &titles {
-            if let Err(e) = Notification::new()
+            let mut notification = Notification::new();
+            notification
                 .summary("StreamVault")
                 .body(&format!("{} added to your library", title))
                 .appname("StreamVault")
-                .timeout(notify_rust::Timeout::Milliseconds(3000))
-                .show()
+                .timeout(notify_rust::Timeout::Milliseconds(3000));
+
+            // Set Windows App User Model ID so notification shows from StreamVault
+            #[cfg(target_os = "windows")]
             {
+                notification.app_id("com.streamvault.app");
+            }
+
+            if let Err(e) = notification.show() {
                 println!("[CLOUD CHANGES] Failed to send notification: {}", e);
             } else {
                 println!("[CLOUD CHANGES] 🔔 Notification: {} added to your library", title);
@@ -3631,13 +3638,20 @@ async fn background_check_cloud_changes(app_handle: &AppHandle) -> Result<CloudI
         }).collect();
 
         for title in &titles {
-            Notification::new()
+            let mut notification = Notification::new();
+            notification
                 .summary("StreamVault")
                 .body(&format!("{} added to your library", title))
                 .appname("StreamVault")
-                .timeout(notify_rust::Timeout::Milliseconds(3000))
-                .show()
-                .ok();
+                .timeout(notify_rust::Timeout::Milliseconds(3000));
+
+            // Set Windows App User Model ID so notification shows from StreamVault
+            #[cfg(target_os = "windows")]
+            {
+                notification.app_id("com.streamvault.app");
+            }
+
+            notification.show().ok();
         }
 
         // Emit library-updated if window exists
@@ -3987,6 +4001,27 @@ fn main() {
     let system_tray = SystemTray::new().with_menu(tray_menu);
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // Another instance tried to start - bring existing window to front
+            println!("[SINGLE-INSTANCE] Another instance attempted to start, focusing existing window");
+            if let Some(window) = app.get_window("main") {
+                window.show().ok();
+                window.unminimize().ok();
+                window.set_focus().ok();
+            } else {
+                // Window was destroyed, create a new one
+                println!("[SINGLE-INSTANCE] Creating new window...");
+                match create_main_window(app) {
+                    Ok(window) => {
+                        window.set_focus().ok();
+                        println!("[SINGLE-INSTANCE] New window created");
+                    }
+                    Err(e) => {
+                        println!("[SINGLE-INSTANCE] Failed to create window: {}", e);
+                    }
+                }
+            }
+        }))
         .system_tray(system_tray)
         .on_system_tray_event(|app, event| {
             match event {

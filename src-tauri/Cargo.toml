@@ -1,6 +1,6 @@
 [package]
 name = "streamvault"
-version = "3.0.2"
+version = "3.0.4"
 description = "A Tauri Media Library App"
 authors = ["Suman Patgiri"]
 license = ""
@@ -12,9 +12,10 @@ tauri-build = { version = "1", features = [] }
 dotenvy = "0.15"
 
 [dependencies]
-tauri = { version = "1", features = [ "updater", "system-tray", "shell-open", "dialog-open", "fs-all", "http-all", "protocol-asset"] }
+tauri = { version = "1", features = [ "window-all", "updater", "system-tray", "shell-open", "dialog-open", "fs-all", "http-all", "protocol-asset"] }
 tauri-plugin-autostart = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v1" }
 tauri-plugin-deep-link = "0.1"
+tauri-plugin-single-instance = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v1" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rusqlite = { version = "0.31", features = ["bundled"] }

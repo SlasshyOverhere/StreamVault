@@ -5,7 +5,7 @@ import { Label } from "@/components/ui/label"
 import { Button } from "@/components/ui/button"
 import {
   Trash2, MonitorPlay, FolderOpen,
-  AlertTriangle, Settings, Key, Zap, Power, X, Save, Sparkles, Eye, Cloud, Wrench, HardDrive, Download, RefreshCw
+  AlertTriangle, Settings, Key, Zap, Power, X, Save, Sparkles, Eye, Cloud, Wrench, HardDrive, Download, RefreshCw, FileText
 } from "lucide-react"
 import {
   Config, getConfig, saveConfig, clearAllAppData, cleanupMissingMetadata, repairFilePaths,
@@ -19,11 +19,13 @@ import { Switch } from "@/components/ui/switch"
 import { motion, AnimatePresence } from "framer-motion"
 import { cn } from "@/lib/utils"
 import { GoogleDriveSettings } from "@/components/GoogleDriveSettings"
+import { CURRENT_APP_VERSION } from "@/components/UpdateNotesModal"
 
 interface SettingsModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   onRestartOnboarding?: () => void
+  onViewUpdateNotes?: () => void
   initialTab?: SettingsSection
   tabVisibility?: TabVisibility
   onTabVisibilityChange?: (visibility: TabVisibility) => void
@@ -31,7 +33,7 @@ interface SettingsModalProps {
 
 type SettingsSection = 'general' | 'cloud' | 'player' | 'api' | 'danger'
 
-export function SettingsModal({ open, onOpenChange, onRestartOnboarding, initialTab, tabVisibility, onTabVisibilityChange }: SettingsModalProps) {
+export function SettingsModal({ open, onOpenChange, onRestartOnboarding, onViewUpdateNotes, initialTab, tabVisibility, onTabVisibilityChange }: SettingsModalProps) {
   const [config, setConfig] = useState<Config>({
     mpv_path: "",
     vlc_path: "",
@@ -424,6 +426,35 @@ export function SettingsModal({ open, onOpenChange, onRestartOnboarding, initial
                         >
                           <Sparkles className="w-4 h-4" />
                           Start Tour
+                        </Button>
+                      </div>
+                    </div>
+
+                    {/* Patch Notes */}
+                    <div className="p-4 rounded-xl bg-card border border-border">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 rounded-lg bg-white/10">
+                            <FileText className="w-5 h-5 text-white" />
+                          </div>
+                          <div>
+                            <Label className="text-base font-medium">Patch Notes</Label>
+                            <p className="text-sm text-muted-foreground">
+                              Version {CURRENT_APP_VERSION}
+                            </p>
+                          </div>
+                        </div>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            onOpenChange(false)
+                            onViewUpdateNotes?.()
+                          }}
+                          className="gap-2"
+                        >
+                          <Eye className="w-4 h-4" />
+                          View Notes
                         </Button>
                       </div>
                     </div>
