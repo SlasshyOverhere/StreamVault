@@ -167,9 +167,6 @@ function App() {
   // Cloud connection state for contextual empty states
   const [isGDriveConnected, setIsGDriveConnected] = useState(false)
 
-  // Continue watching expanded state
-  const [continueWatchingExpanded, setContinueWatchingExpanded] = useState(false)
-
   // Mark complete dialog state
   const [markCompleteDialogOpen, setMarkCompleteDialogOpen] = useState(false)
   const [markCompleteData, setMarkCompleteData] = useState<{
