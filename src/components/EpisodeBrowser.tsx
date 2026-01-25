@@ -132,9 +132,14 @@ export function EpisodeBrowser({ show, onBack }: EpisodeBrowserProps) {
         loadPoster()
 
         let unlistenMpvEnded: UnlistenFn | undefined;
+        let unlistenMarkedComplete: UnlistenFn | undefined;
 
         const setupListener = async () => {
             unlistenMpvEnded = await listen('mpv-playback-ended', () => {
+                loadEpisodes();
+            });
+            // Listen for mark complete events from the dialog
+            unlistenMarkedComplete = await listen('media-marked-complete', () => {
                 loadEpisodes();
             });
         };
@@ -143,6 +148,7 @@ export function EpisodeBrowser({ show, onBack }: EpisodeBrowserProps) {
 
         return () => {
             unlistenMpvEnded?.();
+            unlistenMarkedComplete?.();
         };
     }, [show.id])
 
@@ -468,6 +474,12 @@ export function EpisodeBrowser({ show, onBack }: EpisodeBrowserProps) {
                                                                             <span className="text-[10px] lg:text-xs font-medium text-white">
                                                                                 Episode {episode.episode_number}
                                                                             </span>
+                                                                            {isFinished && (
+                                                                                <span className="flex items-center gap-1 text-[10px] lg:text-xs px-1.5 py-0.5 rounded bg-green-500/20 text-green-400 border border-green-500/30">
+                                                                                    <Check className="w-2.5 h-2.5 lg:w-3 lg:h-3" />
+                                                                                    Watched
+                                                                                </span>
+                                                                            )}
                                                                             {hasProgress && (
                                                                                 <span className="flex items-center gap-1 text-[10px] lg:text-xs px-1.5 py-0.5 rounded bg-white/15 text-white border border-white/20">
                                                                                     <Clock className="w-2.5 h-2.5 lg:w-3 lg:h-3" />

@@ -123,6 +123,16 @@ export const clearAllWatchHistory = async (): Promise<void> => {
     }
 };
 
+// Mark media as complete (100% watched)
+export const markAsComplete = async (mediaId: number): Promise<{ message: string }> => {
+    try {
+        return await invoke('mark_as_complete', { mediaId });
+    } catch (error) {
+        console.error('Failed to mark as complete:', error);
+        throw error;
+    }
+};
+
 // ==================== STREAMING HISTORY ====================
 
 // Streaming history item for online content (Videasy, etc.)

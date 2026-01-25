@@ -1,6 +1,6 @@
 [package]
 name = "streamvault"
-version = "3.0.4"
+version = "3.0.5"
 description = "A Tauri Media Library App"
 authors = ["Suman Patgiri"]
 license = ""

@@ -132,6 +132,27 @@ async fn remove_from_watch_history(
     })
 }
 
+// Mark media as complete (set progress to 100%)
+#[tauri::command]
+async fn mark_as_complete(
+    state: State<'_, AppState>,
+    media_id: i64,
+) -> Result<ApiResponse, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+
+    // Get the media item to find its duration
+    let item = db.get_media_by_id(media_id).map_err(|e| e.to_string())?;
+
+    let duration = item.duration_seconds.unwrap_or(3600.0); // Default 1 hour if no duration
+    // Set position to duration (100% complete) - this will trigger the 95% reset in update_progress
+    db.update_progress(media_id, duration, duration)
+        .map_err(|e| e.to_string())?;
+
+    Ok(ApiResponse {
+        message: format!("Marked '{}' as complete", item.title),
+    })
+}
+
 // Clear all watch history
 #[tauri::command]
 async fn clear_all_watch_history(
@@ -1799,30 +1820,53 @@ async fn delete_series(
     })
 }
 
-// Remove a TV series from the database (does NOT delete files from Drive)
-// Use this when you just want to remove the series from the app
+// Remove a TV series from the database and optionally delete the cloud folder from Drive
 #[tauri::command]
 async fn delete_series_cloud_folder(
     state: State<'_, AppState>,
     series_id: i64,
 ) -> Result<ApiResponse, String> {
-    // Get series title for the message
-    let series_title = {
+    // Get series info including cloud folder ID
+    let (series_title, is_cloud, cloud_folder_id) = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         let media = db.get_media_by_id(series_id).map_err(|e| e.to_string())?;
-        media.title
+        let (is_cloud, folder_id) = db.get_series_cloud_info(series_id).map_err(|e| e.to_string())?;
+        (media.title, is_cloud, folder_id)
     };
 
-    println!("[DELETE] Removing series '{}' (ID: {}) from database only", series_title, series_id);
+    println!("[DELETE] Removing series '{}' (ID: {}) - is_cloud: {}, folder_id: {:?}",
+        series_title, series_id, is_cloud, cloud_folder_id);
 
-    // Just remove from database - don't touch Google Drive
+    // If it's a cloud series and has a folder ID, delete the folder from Google Drive
+    if is_cloud {
+        if let Some(folder_id) = cloud_folder_id {
+            println!("[DELETE] Deleting cloud folder from Google Drive: {}", folder_id);
+            match state.gdrive_client.delete_file(&folder_id).await {
+                Ok(_) => {
+                    println!("[DELETE] Successfully deleted cloud folder: {}", folder_id);
+                }
+                Err(e) => {
+                    println!("[DELETE] Warning: Failed to delete cloud folder {}: {}", folder_id, e);
+                    // Continue anyway - we still want to remove from DB
+                }
+            }
+        }
+    }
+
+    // Delete all episodes from database first
+    {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.remove_series_episodes(series_id).map_err(|e| e.to_string())?;
+    }
+
+    // Remove the series from database
     {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         db.remove_media(series_id).map_err(|e| e.to_string())?;
     }
 
     Ok(ApiResponse {
-        message: format!("Series '{}' removed from library", series_title),
+        message: format!("Series '{}' completely removed", series_title),
     })
 }
 
@@ -2054,6 +2098,9 @@ async fn play_with_mpv(
 
     let is_cloud = media.is_cloud.unwrap_or(false);
     let title = media.title.clone();
+    let season_number = media.season_number;
+    let episode_number = media.episode_number;
+    let media_type = media.media_type.clone();
 
     // Get the playback URL and optional auth header
     let (playback_url, auth_header): (String, Option<String>) = if is_cloud {
@@ -2138,6 +2185,9 @@ async fn play_with_mpv(
             let _ = window_clone.emit("mpv-playback-ended", serde_json::json!({
                 "media_id": media_id,
                 "title": title,
+                "season_number": season_number,
+                "episode_number": episode_number,
+                "media_type": media_type,
                 "final_position": result.final_position,
                 "final_duration": result.final_duration,
                 "completed": result.completed,
@@ -4230,6 +4280,7 @@ fn main() {
             get_watch_history,
             remove_from_watch_history,
             clear_all_watch_history,
+            mark_as_complete,
             // Streaming history commands
             save_streaming_progress,
             get_streaming_history,

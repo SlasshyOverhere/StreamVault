@@ -1655,9 +1655,17 @@ impl Database {
     fn map_media_item(row: &rusqlite::Row) -> rusqlite::Result<MediaItem> {
         let duration: Option<f64> = row.get(7)?;
         let resume_pos: Option<f64> = row.get(8)?;
+        let last_watched: Option<String> = row.get(9)?;
 
-        let progress_percent = match (resume_pos, duration) {
-            (Some(pos), Some(dur)) if dur > 0.0 => Some((pos / dur) * 100.0),
+        // Calculate progress_percent
+        // If resume_position is 0 but last_watched is set and duration > 0,
+        // the item was completed (progress was reset after reaching 95%+)
+        let progress_percent = match (resume_pos, duration, &last_watched) {
+            // Completed: position reset to 0 after finishing, but has watch history
+            (Some(pos), Some(dur), Some(_)) if pos == 0.0 && dur > 0.0 => Some(100.0),
+            // In progress: has position and duration
+            (Some(pos), Some(dur), _) if dur > 0.0 => Some((pos / dur) * 100.0),
+            // Default
             _ => Some(0.0),
         };
 

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { listen, UnlistenFn } from '@tauri-apps/api/event'
+import { listen, emit, UnlistenFn } from '@tauri-apps/api/event'
 import { appWindow } from '@tauri-apps/api/window'
 import { Sidebar } from '@/components/Sidebar'
 import { MovieCard, ContinueCard } from '@/components/MovieCard'
@@ -13,6 +13,7 @@ import { DeleteEpisodesModal } from '@/components/DeleteEpisodesModal'
 import { OnboardingModal } from '@/components/OnboardingModal'
 import { MainAppTour } from '@/components/MainAppTour'
 import { UpdateNotesModal, shouldShowUpdateNotes } from '@/components/UpdateNotesModal'
+import { MarkCompleteDialog } from '@/components/MarkCompleteDialog'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Toaster } from '@/components/ui/toaster'
 import {
@@ -36,6 +37,7 @@ import {
   getTabVisibility,
   setTabVisibility,
   TabVisibility,
+  markAsComplete,
 } from '@/services/api'
 import { initAdBlocker } from '@/utils/adBlocker'
 import {
@@ -63,6 +65,9 @@ interface ScanCompletePayload {
 interface MpvPlaybackEndedPayload {
   media_id: number
   title: string
+  season_number?: number
+  episode_number?: number
+  media_type?: string
   final_position?: number
   final_duration?: number
   completed: boolean
@@ -161,6 +166,19 @@ function App() {
 
   // Cloud connection state for contextual empty states
   const [isGDriveConnected, setIsGDriveConnected] = useState(false)
+
+  // Continue watching expanded state
+  const [continueWatchingExpanded, setContinueWatchingExpanded] = useState(false)
+
+  // Mark complete dialog state
+  const [markCompleteDialogOpen, setMarkCompleteDialogOpen] = useState(false)
+  const [markCompleteData, setMarkCompleteData] = useState<{
+    mediaId: number
+    title: string
+    seasonEpisode?: string
+    progressPercent: number
+    isCompletionConfirmation?: boolean // True when MPV detected end chapter
+  } | null>(null)
 
   // Check onboarding status and load tab visibility on mount
   useEffect(() => {
@@ -269,13 +287,40 @@ function App() {
       })
 
       unlistenMpvEnded = await listen<MpvPlaybackEndedPayload>('mpv-playback-ended', async (event) => {
-        const { title, completed, final_position, final_duration } = event.payload
+        const { media_id, title, season_number, episode_number, media_type, completed, final_position, final_duration } = event.payload
+
+        // Build season/episode string for TV episodes
+        const seasonEpisode = media_type === 'tvepisode' && season_number && episode_number
+          ? `S${String(season_number).padStart(2, '0')}E${String(episode_number).padStart(2, '0')}`
+          : undefined
 
         if (completed) {
-          toast({ title: "Finished", description: `Finished watching: ${title}` })
+          // MPV detected end chapter - ask user to confirm completion
+          setMarkCompleteData({
+            mediaId: media_id,
+            title: title,
+            seasonEpisode,
+            progressPercent: 100,
+            isCompletionConfirmation: true
+          })
+          setMarkCompleteDialogOpen(true)
         } else if (final_position && final_duration && final_position > 30) {
           const progressPercent = (final_position / final_duration) * 100
-          toast({ title: "Progress Saved", description: `${title} - ${progressPercent.toFixed(0)}% watched` })
+
+          // Show mark as complete dialog if progress is between 80-95%
+          if (progressPercent >= 80 && progressPercent < 95) {
+            setMarkCompleteData({
+              mediaId: media_id,
+              title: title,
+              seasonEpisode,
+              progressPercent: progressPercent,
+              isCompletionConfirmation: false
+            })
+            setMarkCompleteDialogOpen(true)
+          } else {
+            const displayTitle = seasonEpisode ? `${title} (${seasonEpisode})` : title
+            toast({ title: "Progress Saved", description: `${displayTitle} - ${progressPercent.toFixed(0)}% watched` })
+          }
         }
 
         // Refresh based on current view - don't clear items for views that don't need refresh
@@ -725,6 +770,24 @@ function App() {
     toast({ title: "Deleted", description: "Selected episodes have been permanently deleted." })
   }
 
+  const handleMarkComplete = async () => {
+    if (!markCompleteData) return
+    try {
+      await markAsComplete(markCompleteData.mediaId)
+      toast({ title: "Marked Complete", description: `${markCompleteData.title} marked as watched` })
+      // Emit event so EpisodeBrowser and other components can refresh
+      await emit('media-marked-complete', { media_id: markCompleteData.mediaId })
+      await loadContinueWatching()
+      // Refresh library items to update progress display on cards
+      await fetchData()
+      if (view === 'history') {
+        setItems(await getWatchHistory())
+      }
+    } catch (error) {
+      toast({ title: "Error", description: "Failed to mark as complete", variant: "destructive" })
+    }
+  }
+
   const toggleTheme = () => {
     toast({ title: "Theme Locked", description: "Dark mode is optimized for this interface." })
   }
@@ -863,7 +926,7 @@ function App() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -15 }}
               transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-              className="fixed top-3 left-1/2 -translate-x-1/2 z-[100] flex items-center gap-2"
+              className="fixed top-11 left-1/2 -translate-x-1/2 z-[100] flex items-center gap-2"
             >
               {/* Sub-tabs for Movies/TV */}
               <div className="flex p-0.5 rounded-full bg-card/90 backdrop-blur-xl border border-white/10 shadow-md">
@@ -948,7 +1011,7 @@ function App() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -15 }}
               transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-              className="fixed top-3 left-1/2 -translate-x-1/2 z-[100] flex items-center gap-2"
+              className="fixed top-11 left-1/2 -translate-x-1/2 z-[100] flex items-center gap-2"
             >
               {/* Tab Pills */}
               <div className="flex p-0.5 rounded-full bg-card/90 backdrop-blur-xl border border-white/10 shadow-md">
@@ -1030,7 +1093,7 @@ function App() {
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
-                  className="flex flex-col min-h-[calc(100vh-80px)]"
+                  className="min-h-[calc(100vh-80px)] flex flex-col"
                 >
                   {/* Search Results - Only show when searching */}
                   {homeSearchResults.length > 0 && (
@@ -1062,8 +1125,8 @@ function App() {
 
                   {/* Hero Search Section - Large and centered */}
                   {!homeSearchQuery && (
-                    <div className="flex-1 flex flex-col items-center justify-center py-8">
-                      <div className="w-full max-w-2xl mx-auto text-center px-4">
+                    <div className="flex-1 flex items-center justify-center py-6">
+                      <div className="w-full max-w-xl text-center">
                         <h2 className="text-3xl font-bold tracking-tight text-white mb-2">
                           <span className="bg-clip-text text-transparent bg-gradient-to-r from-white via-white to-white/70">
                             Discover your next
@@ -1074,11 +1137,11 @@ function App() {
                           </span>
                         </h2>
 
-                        <p className="text-sm text-muted-foreground mb-4 max-w-md mx-auto">
+                        <p className="text-sm text-muted-foreground mb-4">
                           Search across your library and streaming services
                         </p>
 
-                        <div className="relative max-w-lg mx-auto group">
+                        <div className="relative max-w-md mx-auto group">
                           <div className="relative flex items-center bg-card/80 backdrop-blur-xl border border-white/10 rounded-xl shadow-lg p-1.5 transition-all group-focus-within:border-white/50 group-focus-within:bg-card">
                             <Search className="w-5 h-5 text-muted-foreground ml-3" />
                             <input
@@ -1130,7 +1193,7 @@ function App() {
 
                   {/* Bottom Sections - Continue Watching and Library Stats */}
                   {!homeSearchQuery && (
-                    <div className="space-y-4 pb-4">
+                    <div className="space-y-4 pb-4 mt-auto">
                       {/* Continue Watching - Middle Bottom */}
                       {continueWatching.length > 0 && (
                         <motion.section
@@ -1156,8 +1219,8 @@ function App() {
                               <ChevronRight className="w-3 h-3 transition-transform group-hover:translate-x-1" />
                             </button>
                           </div>
-                          <div className="flex gap-3 overflow-x-auto pb-3 -mx-2 px-2 scroll-fade">
-                            {continueWatching.map((item, index) => (
+                          <div className="flex gap-3 pb-3">
+                            {continueWatching.slice(0, 3).map((item, index) => (
                               <ContinueCard
                                 key={item.id}
                                 item={item}
@@ -1884,6 +1947,21 @@ function App() {
         open={showUpdateNotes}
         onOpenChange={setShowUpdateNotes}
       />
+
+      {/* Mark Complete Dialog */}
+      {markCompleteData && (
+        <MarkCompleteDialog
+          open={markCompleteDialogOpen}
+          onOpenChange={setMarkCompleteDialogOpen}
+          title={markCompleteData.title}
+          seasonEpisode={markCompleteData.seasonEpisode}
+          progressPercent={markCompleteData.progressPercent}
+          onMarkComplete={handleMarkComplete}
+          onKeepProgress={() => {
+            toast({ title: "Progress Saved", description: `${markCompleteData.title} - ${markCompleteData.progressPercent.toFixed(0)}% watched` })
+          }}
+        />
+      )}
 
       <Toaster />
     </div>
