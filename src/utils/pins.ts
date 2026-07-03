@@ -19,9 +19,19 @@ export function togglePin(id: string | number): boolean {
 
 export function sortPinnedFirst<T extends { id: string | number }>(items: T[]): T[] {
   const pinned = getPinnedIds()
-  return items.toSorted((a, b) => {
-    const aPinned = pinned.has(String(a.id)) ? 1 : 0
-    const bPinned = pinned.has(String(b.id)) ? 1 : 0
-    return bPinned - aPinned
-  })
+
+  // Use a single O(N) pass rather than O(N log N) .toSorted
+  // This is highly preferred for binary sorting (pinned vs unpinned)
+  const pinnedItems: T[] = []
+  const unpinnedItems: T[] = []
+
+  for (const item of items) {
+    if (pinned.has(String(item.id))) {
+      pinnedItems.push(item)
+    } else {
+      unpinnedItems.push(item)
+    }
+  }
+
+  return [...pinnedItems, ...unpinnedItems]
 }
