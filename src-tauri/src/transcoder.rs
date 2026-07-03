@@ -221,9 +221,15 @@ fn run_transcode_server(port: u16, ffmpeg_path: &str, file_path: &str, start_tim
                 }
             }
 
+            let safe_file_path = if file_path.starts_with("http://") || file_path.starts_with("https://") || file_path.starts_with("file:") {
+                file_path.to_string()
+            } else {
+                format!("file:{}", file_path)
+            };
+
             args.extend(vec![
                 "-i",
-                file_path,
+                &safe_file_path,
                 "-c:v",
                 "libx264",
                 "-preset",
