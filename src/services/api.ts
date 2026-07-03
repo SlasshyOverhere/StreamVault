@@ -1421,35 +1421,36 @@ export const mergeCachedSeriesSubtitleTracks = (
   mergeCachedSeriesTracks(seriesId, tracks, getCachedSeriesSubtitleTracks, setCachedSeriesSubtitleTracks);
 };
 
-const matchesAudioTrackPreference = (
-  track: AudioTrackOption,
-  storedPreference: string,
-): boolean => {
+const createAudioTrackMatcher = (storedPreference: string) => {
   const normalizedPreference = storedPreference.trim().toLowerCase();
   if (!normalizedPreference) {
-    return false;
+    return () => false;
   }
 
-  const preferenceParts = normalizedPreference
-    .split(",")
-    .flatMap((part) => {
-      const trimmed = part.trim();
-      return trimmed ? [trimmed] : [];
-    });
-
-  const languageCode = track.language_code?.trim().toLowerCase();
-  const label = track.label.trim().toLowerCase();
-  const detail = track.detail?.trim().toLowerCase();
-  const mpvValue = track.mpv_value?.trim().toLowerCase();
-
-  return (
-    mpvValue === normalizedPreference ||
-    languageCode === normalizedPreference ||
-    label === normalizedPreference ||
-    detail === normalizedPreference ||
-    (!!languageCode && preferenceParts.includes(languageCode)) ||
-    preferenceParts.includes(label)
+  const preferenceParts = new Set(
+    normalizedPreference
+      .split(",")
+      .flatMap((part) => {
+        const trimmed = part.trim();
+        return trimmed ? [trimmed] : [];
+      })
   );
+
+  return (track: AudioTrackOption): boolean => {
+    const languageCode = track.language_code?.trim().toLowerCase();
+    const label = track.label.trim().toLowerCase();
+    const detail = track.detail?.trim().toLowerCase();
+    const mpvValue = track.mpv_value?.trim().toLowerCase();
+
+    return (
+      mpvValue === normalizedPreference ||
+      languageCode === normalizedPreference ||
+      label === normalizedPreference ||
+      detail === normalizedPreference ||
+      (!!languageCode && preferenceParts.has(languageCode)) ||
+      preferenceParts.has(label)
+    );
+  };
 };
 
 export const resolveSeriesAudioPreferenceForPlayback = (
@@ -1470,9 +1471,8 @@ export const resolveSeriesAudioPreferenceForPlayback = (
     return storedPreference;
   }
 
-  const matchedTrack = cachedTracks.find((track) =>
-    matchesAudioTrackPreference(track, storedPreference),
-  );
+  const matcher = createAudioTrackMatcher(storedPreference);
+  const matchedTrack = cachedTracks.find(matcher);
 
   return matchedTrack?.mpv_value?.trim() || storedPreference;
 };
@@ -1495,9 +1495,8 @@ export const resolveSeriesSubtitlePreferenceForPlayback = (
     return storedPreference;
   }
 
-  const matchedTrack = cachedTracks.find((track) =>
-    matchesAudioTrackPreference(track, storedPreference),
-  );
+  const matcher = createAudioTrackMatcher(storedPreference);
+  const matchedTrack = cachedTracks.find(matcher);
 
   return matchedTrack?.mpv_value?.trim() || storedPreference;
 };

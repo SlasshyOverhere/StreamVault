@@ -1,3 +1,6 @@
 ## 2025-05-18 - Avoid repeated array calculations inside React mapping loops
 **Learning:** In complex mapping loops within React, doing operations that calculate data across an entire array on every iteration (e.g., finding the `Math.max` for a progress bar ratio using `Math.max(...data.map(d => d.value))`) escalates the rendering complexity to O(N²), causing serious slowdowns when the array scales up in components like `AnalyticsView.tsx`.
 **Action:** Use an Immediately Invoked Function Expression (IIFE) around the block, or pre-calculate variables utilizing `useMemo` before mapping. This allows computing single values once before entering the loop to ensure strict O(N) array mapping performance.
+## 2026-07-03 — Avoid redundant array manipulations in React mapping and matching loops
+**Learning:** Redundant array manipulations, such as splitting strings using `.split()` and finding items using `.includes()` within `.map()` or `.find()` iterations, cause unnecessary allocations and computational overhead, elevating time complexity to (N \times M)$.
+**Action:** Extract invariant operations outside the loop. Use `Set.has()` instead of `Array.prototype.includes()` for (1)$ lookups to guarantee (N)$ execution time.
