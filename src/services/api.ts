@@ -1423,20 +1423,9 @@ export const mergeCachedSeriesSubtitleTracks = (
 
 const matchesAudioTrackPreference = (
   track: AudioTrackOption,
-  storedPreference: string,
+  normalizedPreference: string,
+  preferencePartsSet: Set<string>,
 ): boolean => {
-  const normalizedPreference = storedPreference.trim().toLowerCase();
-  if (!normalizedPreference) {
-    return false;
-  }
-
-  const preferenceParts = normalizedPreference
-    .split(",")
-    .flatMap((part) => {
-      const trimmed = part.trim();
-      return trimmed ? [trimmed] : [];
-    });
-
   const languageCode = track.language_code?.trim().toLowerCase();
   const label = track.label.trim().toLowerCase();
   const detail = track.detail?.trim().toLowerCase();
@@ -1447,8 +1436,8 @@ const matchesAudioTrackPreference = (
     languageCode === normalizedPreference ||
     label === normalizedPreference ||
     detail === normalizedPreference ||
-    (!!languageCode && preferenceParts.includes(languageCode)) ||
-    preferenceParts.includes(label)
+    (!!languageCode && preferencePartsSet.has(languageCode)) ||
+    preferencePartsSet.has(label)
   );
 };
 
@@ -1470,8 +1459,22 @@ export const resolveSeriesAudioPreferenceForPlayback = (
     return storedPreference;
   }
 
+  const normalizedPreference = storedPreference.trim().toLowerCase();
+  if (!normalizedPreference) {
+    return storedPreference;
+  }
+
+  const preferencePartsSet = new Set(
+    normalizedPreference
+      .split(",")
+      .flatMap((part) => {
+        const trimmed = part.trim();
+        return trimmed ? [trimmed] : [];
+      })
+  );
+
   const matchedTrack = cachedTracks.find((track) =>
-    matchesAudioTrackPreference(track, storedPreference),
+    matchesAudioTrackPreference(track, normalizedPreference, preferencePartsSet),
   );
 
   return matchedTrack?.mpv_value?.trim() || storedPreference;
@@ -1495,8 +1498,22 @@ export const resolveSeriesSubtitlePreferenceForPlayback = (
     return storedPreference;
   }
 
+  const normalizedPreference = storedPreference.trim().toLowerCase();
+  if (!normalizedPreference) {
+    return storedPreference;
+  }
+
+  const preferencePartsSet = new Set(
+    normalizedPreference
+      .split(",")
+      .flatMap((part) => {
+        const trimmed = part.trim();
+        return trimmed ? [trimmed] : [];
+      })
+  );
+
   const matchedTrack = cachedTracks.find((track) =>
-    matchesAudioTrackPreference(track, storedPreference),
+    matchesAudioTrackPreference(track, normalizedPreference, preferencePartsSet),
   );
 
   return matchedTrack?.mpv_value?.trim() || storedPreference;
