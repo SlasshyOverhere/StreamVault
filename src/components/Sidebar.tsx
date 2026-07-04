@@ -163,9 +163,10 @@ export function Sidebar({
                     key={item.id}
                     data-tour={`nav-${item.id}`}
                     aria-label={item.label}
+                    aria-current={isActive ? "page" : undefined}
                     onClick={() => setView(item.id)}
                   className={cn(
-                    "group relative w-full flex items-center gap-3 px-3.5 py-3 rounded-xl transition-colors duration-300",
+                    "focus-ring group relative w-full flex items-center gap-3 px-3.5 py-3 rounded-xl transition-colors duration-300",
                     isActive
                       ? "bg-white/[0.12] text-white shadow-[0_0_25px_rgba(255,255,255,0.08)] border border-white/20 backdrop-blur-md"
                       : "text-neutral-500 hover:text-neutral-200 hover:bg-white/[0.04]",
@@ -255,7 +256,7 @@ export function Sidebar({
                 disabled={isCloudIndexing || isScanning}
                 aria-label="Update Library"
                 className={cn(
-                  "w-full flex items-center justify-between transition-all duration-300",
+                  "focus-ring w-full flex items-center justify-between transition-all duration-300",
                   isCollapsed
                     ? "size-10 justify-center rounded-full bg-white/[0.04] border border-white/[0.08] hover:bg-white/[0.08]"
                     : "px-4 py-2.5 rounded-xl bg-white/[0.04] border border-white/[0.06] hover:bg-white/[0.08] hover:border-white/10 group",
@@ -278,7 +279,7 @@ export function Sidebar({
                 disabled={isCloudIndexing || isScanning}
                 aria-label="Sync Validator"
                 className={cn(
-                  "w-full flex items-center justify-between transition-all duration-300",
+                  "focus-ring w-full flex items-center justify-between transition-all duration-300",
                   isCollapsed
                     ? "size-10 justify-center rounded-full bg-white/[0.04] border border-white/[0.08] hover:bg-white/[0.08]"
                     : "px-4 py-2.5 rounded-xl bg-white/[0.04] border border-white/[0.06] hover:bg-white/[0.08] hover:border-white/10 group",
@@ -299,7 +300,7 @@ export function Sidebar({
                 onClick={onDuplicateDetector}
                 aria-label="Duplicate Detector"
                 className={cn(
-                  "w-full flex items-center justify-between transition-all duration-300",
+                  "focus-ring w-full flex items-center justify-between transition-all duration-300",
                   isCollapsed
                     ? "size-10 justify-center rounded-full bg-white/[0.04] border border-white/[0.08] hover:bg-white/[0.08]"
                     : "px-4 py-2.5 rounded-xl bg-white/[0.04] border border-white/[0.06] hover:bg-white/[0.08] hover:border-white/10 group"
@@ -389,7 +390,7 @@ export function Sidebar({
                 title={isPinned ? "Unpin sidebar" : "Pin sidebar"}
                 aria-label={isPinned ? "Unpin sidebar" : "Pin sidebar"}
                 className={cn(
-                  "w-full h-10 rounded-xl border transition-all duration-200 flex items-center justify-center",
+                  "focus-ring w-full h-10 rounded-xl border transition-all duration-200 flex items-center justify-center",
                   isPinned
                     ? "text-amber-400 bg-amber-500/10 border-amber-500/25"
                     : "text-neutral-500 border-white/[0.06] bg-white/[0.03] hover:bg-white/[0.08] hover:text-white hover:border-white/10"
@@ -408,7 +409,7 @@ export function Sidebar({
                 onClick={onOpenSettings}
                 title="Open settings"
                 aria-label="Open settings"
-                className="w-full h-10 rounded-xl border border-white/[0.06] bg-white/[0.03] transition-colors duration-200 flex items-center justify-center text-neutral-500 hover:bg-white/[0.08] hover:text-white hover:border-white/10"
+                className="focus-ring w-full h-10 rounded-xl border border-white/[0.06] bg-white/[0.03] transition-colors duration-200 flex items-center justify-center text-neutral-500 hover:bg-white/[0.08] hover:text-white hover:border-white/10"
               >
                 <Settings className="size-4 transition-transform duration-200 group-hover:rotate-45" />
               </button>
@@ -426,7 +427,7 @@ export function Sidebar({
                 title={isPinned ? "Unpin sidebar" : "Pin sidebar"}
                 aria-label={isPinned ? "Unpin sidebar" : "Pin sidebar"}
                 className={cn(
-                  "group h-11 w-full rounded-xl border transition-all duration-200 flex items-center justify-center gap-2.5 px-3",
+                  "focus-ring group h-11 w-full rounded-xl border transition-all duration-200 flex items-center justify-center gap-2.5 px-3",
                   isPinned
                     ? "border-amber-500/25 bg-amber-500/10 text-amber-400 shadow-sm shadow-amber-500/5"
                     : "border-white/[0.06] bg-white/[0.03] text-neutral-500 hover:bg-white/[0.08] hover:text-white hover:border-white/10"
@@ -443,7 +444,7 @@ export function Sidebar({
                 onClick={onOpenSettings}
                 title="Open settings"
                 aria-label="Open settings"
-                className="group h-11 w-full rounded-xl border border-white/[0.06] bg-white/[0.03] transition-all duration-200 flex items-center justify-center gap-2.5 px-3 text-neutral-500 hover:bg-white/[0.08] hover:text-white hover:border-white/10"
+                className="focus-ring group h-11 w-full rounded-xl border border-white/[0.06] bg-white/[0.03] transition-all duration-200 flex items-center justify-center gap-2.5 px-3 text-neutral-500 hover:bg-white/[0.08] hover:text-white hover:border-white/10"
               >
                 <Settings className="size-4 transition-transform duration-200 group-hover:rotate-45" />
                 <span className="text-[11px] font-semibold tracking-wider uppercase">Settings</span>
