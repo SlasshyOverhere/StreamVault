@@ -407,20 +407,24 @@ export function ContentDetailsModal({
     }
 
     const storedPreference = getSeriesAudioPreference(seriesPreferenceId)
+
+    // Lily: Hoist string parsing and Set creation outside the loop to avoid redundant operations on every iteration.
+    const normalizedAudioStored = storedPreference?.trim().toLowerCase()
+    const audioPreferenceParts = new Set(
+      normalizedAudioStored
+        ? normalizedAudioStored.split(",").map((part) => part.trim()).filter(Boolean)
+        : []
+    )
+
     const presetMatch = detectedAudioTracks.find(
       (option) => {
-        const normalizedStored = storedPreference?.trim().toLowerCase()
-        if (!normalizedStored) return false
-
-        const preferenceParts = normalizedStored
-          .split(",")
-          .map((part) => part.trim())
-          .filter(Boolean)
+        if (!normalizedAudioStored) return false
+        const langCode = option.language_code?.trim().toLowerCase()
 
         return (
-          option.mpv_value?.trim().toLowerCase() === normalizedStored ||
-          option.language_code?.trim().toLowerCase() === normalizedStored ||
-          preferenceParts.includes(option.language_code?.trim().toLowerCase() || "")
+          option.mpv_value?.trim().toLowerCase() === normalizedAudioStored ||
+          langCode === normalizedAudioStored ||
+          (!!langCode && audioPreferenceParts.has(langCode))
         )
       },
     )
@@ -457,18 +461,21 @@ export function ContentDetailsModal({
       return
     }
 
+    // Lily: Hoist string parsing and Set creation outside the loop to avoid redundant operations on every iteration.
+    const subtitlePreferenceParts = new Set(
+      normalizedStored
+        ? normalizedStored.split(",").map((part) => part.trim()).filter(Boolean)
+        : []
+    )
+
     const presetMatch = detectedSubtitleTracks.find((option) => {
       if (!normalizedStored) return false
-
-      const preferenceParts = normalizedStored
-        .split(",")
-        .map((part) => part.trim())
-        .filter(Boolean)
+      const langCode = option.language_code?.trim().toLowerCase()
 
       return (
         option.mpv_value?.trim().toLowerCase() === normalizedStored ||
-        option.language_code?.trim().toLowerCase() === normalizedStored ||
-        preferenceParts.includes(option.language_code?.trim().toLowerCase() || "")
+        langCode === normalizedStored ||
+        (!!langCode && subtitlePreferenceParts.has(langCode))
       )
     })
 

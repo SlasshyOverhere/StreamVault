@@ -1423,20 +1423,9 @@ export const mergeCachedSeriesSubtitleTracks = (
 
 const matchesAudioTrackPreference = (
   track: AudioTrackOption,
-  storedPreference: string,
+  normalizedPreference: string,
+  preferenceParts: Set<string>
 ): boolean => {
-  const normalizedPreference = storedPreference.trim().toLowerCase();
-  if (!normalizedPreference) {
-    return false;
-  }
-
-  const preferenceParts = normalizedPreference
-    .split(",")
-    .flatMap((part) => {
-      const trimmed = part.trim();
-      return trimmed ? [trimmed] : [];
-    });
-
   const languageCode = track.language_code?.trim().toLowerCase();
   const label = track.label.trim().toLowerCase();
   const detail = track.detail?.trim().toLowerCase();
@@ -1447,8 +1436,8 @@ const matchesAudioTrackPreference = (
     languageCode === normalizedPreference ||
     label === normalizedPreference ||
     detail === normalizedPreference ||
-    (!!languageCode && preferenceParts.includes(languageCode)) ||
-    preferenceParts.includes(label)
+    (!!languageCode && preferenceParts.has(languageCode)) ||
+    preferenceParts.has(label)
   );
 };
 
@@ -1465,13 +1454,22 @@ export const resolveSeriesAudioPreferenceForPlayback = (
     return null;
   }
 
+  // Lily: Precompute string parts and use a Set to avoid redundant operations on every track check
+  const normalizedPreference = storedPreference.trim().toLowerCase();
+  const preferenceParts = new Set(
+    normalizedPreference
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean)
+  );
+
   const cachedTracks = getCachedSeriesAudioTracks(seriesId);
   if (!cachedTracks || cachedTracks.length === 0) {
     return storedPreference;
   }
 
   const matchedTrack = cachedTracks.find((track) =>
-    matchesAudioTrackPreference(track, storedPreference),
+    matchesAudioTrackPreference(track, normalizedPreference, preferenceParts),
   );
 
   return matchedTrack?.mpv_value?.trim() || storedPreference;
@@ -1490,13 +1488,22 @@ export const resolveSeriesSubtitlePreferenceForPlayback = (
     return null;
   }
 
+  // Lily: Precompute string parts and use a Set to avoid redundant operations on every track check
+  const normalizedPreference = storedPreference.trim().toLowerCase();
+  const preferenceParts = new Set(
+    normalizedPreference
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean)
+  );
+
   const cachedTracks = getCachedSeriesSubtitleTracks(seriesId);
   if (!cachedTracks || cachedTracks.length === 0) {
     return storedPreference;
   }
 
   const matchedTrack = cachedTracks.find((track) =>
-    matchesAudioTrackPreference(track, storedPreference),
+    matchesAudioTrackPreference(track, normalizedPreference, preferenceParts),
   );
 
   return matchedTrack?.mpv_value?.trim() || storedPreference;
