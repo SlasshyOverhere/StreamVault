@@ -4329,7 +4329,7 @@ checksum = "7a2ae44ef20feb57a68b23d846850f861394c2e02dc425a50098ae8c90267589"
 
 [[package]]
 name = "slasshyvault"
-version = "3.0.58"
+version = "3.0.59"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",

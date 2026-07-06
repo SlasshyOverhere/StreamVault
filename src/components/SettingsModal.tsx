@@ -1704,17 +1704,19 @@ export function SettingsModal({
                             <Label className="text-base font-medium">
                               API Keys
                             </Label>
-                            <p className="text-sm text-muted-foreground">
-                              TMDB (metadata) and OMDb (IMDb ratings)
-                            </p>
-                          </div>
+                              <p className="text-sm text-muted-foreground">
+                                TMDB (metadata, optional) and OMDb (IMDb ratings, optional)
+                              </p>
+                            </div>
                         </div>
 
                         {/* API Keys info */}
                         <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
                           <p className="text-xs text-blue-300 leading-relaxed">
-                            IMDb ratings now use <strong>imdbapi.dev</strong> for free — no key needed.
-                            Optionally set your own keys below for dedicated rate limits.
+                            TMDB is <strong>optional</strong>. Without one, metadata queries fall back to
+                            the free <a className="underline" href="https://imdbapi.dev" target="_blank" rel="noopener noreferrer">imdbapi.dev</a> service.
+                            IMDb ratings also use imdbapi.dev by default — OMDb is only needed for
+                            dedicated rate limits.
                           </p>
                         </div>
 
@@ -1729,7 +1731,7 @@ export function SettingsModal({
                             {/* TMDB Key */}
                             <div>
                               <label htmlFor="tmdb-api-key" className="text-xs font-bold text-white/60 uppercase tracking-wider mb-1.5 block">
-                                TMDB API Key
+                                TMDB API Key <span className="text-white/40 font-normal">(optional)</span>
                               </label>
                               <Input
                                 id="tmdb-api-key"
@@ -1741,10 +1743,20 @@ export function SettingsModal({
                                     tmdb_api_key: e.target.value,
                                   })
                                 }
-                                placeholder="Enter your TMDB API key or Access Token"
+                                placeholder="Leave blank to use imdbapi.dev (free)"
                               />
                               <p className="text-xs text-muted-foreground mt-1.5">
-                                Used for metadata, posters, and search. Get yours at{" "}
+                                Recommended for richer metadata and trending suggestions.
+                                Without a key, the app falls back to the free{" "}
+                                <a
+                                  href="https://imdbapi.dev"
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-white hover:underline"
+                                >
+                                  imdbapi.dev
+                                </a>{" "}
+                                service. Get yours at{" "}
                                 <a
                                   href="https://www.themoviedb.org/settings/api"
                                   target="_blank"
@@ -1752,7 +1764,7 @@ export function SettingsModal({
                                   className="text-white hover:underline"
                                 >
                                   themoviedb.org
-                                </a>
+                                </a>.
                               </p>
                             </div>
 

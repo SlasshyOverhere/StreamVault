@@ -628,6 +628,7 @@ export function ContentDetailsModal({
       const expectedType = target.media_type === "movie" ? "movie" : "tv"
       const itemTmdbId = Number.parseInt(target.tmdb_id || "", 10)
       const hasItemTmdbId = Number.isFinite(itemTmdbId) && itemTmdbId > 0
+      const itemImdbId = (target.imdb_id ?? null) as string | null
       let nextHero = cachedHero ?? null
 
       const posterPromise = resolveLocalImage(target.poster_path)
@@ -635,13 +636,13 @@ export function ContentDetailsModal({
         ? target.media_type === "movie"
           ? (movieDetailsCache.has(itemTmdbId)
               ? Promise.resolve(movieDetailsCache.get(itemTmdbId) ?? null)
-              : getMovieDetails(itemTmdbId).then((details) => {
+              : getMovieDetails(itemTmdbId, itemImdbId).then((details) => {
                   movieDetailsCache.set(itemTmdbId, details)
                   return details
                 }))
           : (tvDetailsCache.has(itemTmdbId)
               ? Promise.resolve(tvDetailsCache.get(itemTmdbId) ?? null)
-              : getTvDetails(itemTmdbId).then((details) => {
+              : getTvDetails(itemTmdbId, itemImdbId).then((details) => {
                   tvDetailsCache.set(itemTmdbId, details)
                   return details
                 }))

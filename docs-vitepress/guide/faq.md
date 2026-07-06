@@ -14,7 +14,9 @@ Watch history → local SQLite. Config → local JSON. Media → your Drive or l
 
 ## Can I use my own TMDB/OMDb keys?
 
-Yes. Settings → API Keys. IMDb ratings fall back to free imdbapi.dev if no OMDb key is provided.
+Yes. Settings → API Keys. Both are optional. Without a TMDB key, metadata
+lookups fall back to the free imdbapi.dev service. OMDb is similarly optional —
+IMDb ratings default to imdbapi.dev unless you supply an OMDb key.
 
 ## How does Watch Together work?
 

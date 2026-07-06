@@ -159,6 +159,36 @@ fn build_tmdb_url(base_path: &str, credential: &str, extra_params: &str) -> Stri
     }
 }
 
+// ── Source routing ──────────────────────────────────────────────────────────
+//
+// Rule: a configured TMDB API key routes all metadata lookups to
+// `api.themoviedb.org`. Without a key, the free `api.imdbapi.dev` service is
+// used as a fallback. The legacy "TMDP" backend on `slasshyvault.onrender.com`
+// has been decommissioned and no longer appears in any code path.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataSource {
+    /// TMDB API key is configured — talk to themoviedb.org.
+    Tmdb,
+    /// No TMDB API key — talk to v3-cinemeta.strem.io (free, no key,
+    /// richer than imdbapi.dev: cast/director/imdbRating/moviedb_id/episode thumbs).
+    Cinemeta,
+    /// Last resort — `api.imdbapi.dev`. Used when Cinemeta returned nothing.
+    Imdb,
+}
+
+/// Pick the preferred metadata source for a given configured TMDB API key.
+pub fn pick_source(api_key: &str) -> MetadataSource {
+    if api_key.trim().is_empty() {
+        MetadataSource::Cinemeta
+    } else {
+        MetadataSource::Tmdb
+    }
+}
+
+pub const IMDB_LOG_PREFIX: &str = "[IMDBAPI]";
+pub const CINEMETA_LOG_PREFIX: &str = "[CINEMETA]";
+
 /// Execute a TMDB request with proper authentication and robust retry logic
 fn tmdb_request(
     client: &reqwest::blocking::Client,
@@ -552,6 +582,155 @@ pub fn search_metadata(
     Ok(None)
 }
 
+/// Title-based metadata search routed by configured TMDB key:
+/// TMDB if the key is set, otherwise the free imdbapi.dev service.
+pub fn search_metadata_with_fallback(
+    api_key: &str,
+    title: &str,
+    media_type: &str,
+    year: Option<i32>,
+    image_cache_dir: &str,
+) -> Result<Option<TmdbMetadata>, Box<dyn std::error::Error + Send + Sync>> {
+    match pick_source(api_key) {
+        MetadataSource::Tmdb => search_metadata(api_key, title, media_type, year, image_cache_dir),
+        MetadataSource::Cinemeta => {
+            let cinemeta_kind = match media_type {
+                "movie" => crate::cinemeta_api::CinemetaKind::Movie,
+                "tv" => crate::cinemeta_api::CinemetaKind::Series,
+                _ => crate::cinemeta_api::CinemetaKind::Movie,
+            };
+            if let Ok(titles) =
+                crate::cinemeta_api::search(cinemeta_kind, title, 25)
+            {
+                let best = titles.into_iter().find(|t| {
+                    if let Some(y) = year {
+                        parse_year_str(t.year.as_deref())
+                            .map(|cy| (cy - y).abs() <= 1)
+                            .unwrap_or(false)
+                    } else {
+                        true
+                    }
+                });
+                if let Some(t) = best {
+                    let mtype = if t.kind == "series" { "tv" } else { "movie" };
+                    return fetch_metadata_by_cinemeta_title(&t, mtype, image_cache_dir).map(Some);
+                }
+            }
+            let imdb_type_filter = match media_type {
+                "movie" => Some("movie"),
+                "tv" => Some("tv"),
+                _ => None,
+            };
+            let candidates =
+                crate::imdb_api::search_titles(title, imdb_type_filter, 25).map_err(|e| {
+                    Box::<dyn std::error::Error + Send + Sync>::from(e.to_string())
+                })?;
+            let best = candidates.into_iter().find(|c| {
+                if let Some(y) = year {
+                    c.start_year.map(|cy| (cy - y).abs() <= 1).unwrap_or(false)
+                } else {
+                    true
+                }
+            });
+            match best {
+                Some(t) => {
+                    let mtype = match t.type_.as_deref() {
+                        Some("TV_SERIES") | Some("TV_MINI_SERIES") | Some("TV_SPECIAL") => "tv",
+                        _ => "movie",
+                    };
+                    fetch_metadata_by_imdb_id(&t.id, mtype, image_cache_dir).map(Some)
+                }
+                None => {
+                    println!("[IMDBAPI] no match found for \"{}\"", title);
+                    Ok(None)
+                }
+            }
+        }
+        MetadataSource::Imdb => {
+            let imdb_type_filter = match media_type {
+                "movie" => Some("movie"),
+                "tv" => Some("tv"),
+                _ => None,
+            };
+            let candidates =
+                crate::imdb_api::search_titles(title, imdb_type_filter, 25).map_err(|e| {
+                    Box::<dyn std::error::Error + Send + Sync>::from(e.to_string())
+                })?;
+            let best = candidates.into_iter().find(|c| {
+                if let Some(y) = year {
+                    c.start_year.map(|cy| (cy - y).abs() <= 1).unwrap_or(false)
+                } else {
+                    true
+                }
+            });
+            match best {
+                Some(t) => {
+                    let mtype = match t.type_.as_deref() {
+                        Some("TV_SERIES") | Some("TV_MINI_SERIES") | Some("TV_SPECIAL") => "tv",
+                        _ => "movie",
+                    };
+                    fetch_metadata_by_imdb_id(&t.id, mtype, image_cache_dir).map(Some)
+                }
+                None => {
+                    println!("[IMDBAPI] no match found for \"{}\"", title);
+                    Ok(None)
+                }
+            }
+        }
+    }
+}
+
+fn fetch_metadata_by_cinemeta_title(
+    t: &crate::cinemeta_api::CinemetaTitle,
+    media_type: &str,
+    image_cache_dir: &str,
+) -> Result<TmdbMetadata, Box<dyn std::error::Error + Send + Sync>> {
+    let image_type = if media_type == "tv" {
+        ImageType::SeriesBanner
+    } else {
+        ImageType::MovieBanner
+    };
+    let poster_path = t
+        .poster
+        .as_deref()
+        .and_then(|u| cache_imdb_image(u, std::path::Path::new(image_cache_dir), &image_type));
+    let year = parse_year_str(t.year.as_deref()).or_else(|| {
+        t.released
+            .as_deref()
+            .and_then(|s| s.get(..4))
+            .and_then(|y| y.parse::<i32>().ok())
+    });
+    let cast = t.cast.clone().map(|v| {
+        v.into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .take(8)
+            .collect::<Vec<_>>()
+            .join(", ")
+    });
+    let director = t
+        .director
+        .clone()
+        .and_then(|mut v| if v.is_empty() { None } else { Some(v.remove(0)) });
+    let runtime = t
+        .runtime
+        .as_deref()
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|n| n.parse::<i32>().ok())
+        .map(|m| (m as f64) * 60.0);
+    Ok(TmdbMetadata {
+        title: t.name.clone(),
+        year,
+        overview: t.description.clone(),
+        cast_names: cast.filter(|s| !s.is_empty()),
+        director,
+        poster_path: poster_path.clone(),
+        tmdb_id: t.moviedb_id.map(|n| n.to_string()),
+        imdb_id: t.imdb_id.clone().or_else(|| Some(t.id.clone())),
+        runtime_seconds: runtime,
+        imdb_image_url: t.poster.clone(),
+    })
+}
+
 /// Raw multi-search for UI pickers (returns movie/tv result list, no metadata caching).
 pub fn search_multi_raw(
     api_key: &str,
@@ -650,11 +829,133 @@ pub fn search_multi_raw(
     Ok(results)
 }
 
+/// Free-text search that auto-routes between TMDB and imdbapi.dev based on
+/// whether the user has configured a TMDB API key. Results are emitted in the
+/// `TmdbSearchListItem` shape so existing UI code consumes them unchanged.
+///
+/// `media_type` ∈ `Some("movie") | Some("tv") | None`. When `None`, results
+/// of any type pass through; the UI will filter further.
+pub fn search_multi_raw_with_fallback(
+    api_key: &str,
+    query: &str,
+    media_type: Option<&str>,
+) -> Result<Vec<TmdbSearchListItem>, Box<dyn std::error::Error + Send + Sync>> {
+    match pick_source(api_key) {
+        MetadataSource::Tmdb => search_multi_raw(api_key, query),
+        MetadataSource::Cinemeta => match cinemeta_search_as_list_items(query, media_type) {
+            Ok(items) if !items.is_empty() => Ok(items),
+            _ => imdb_search_as_list_items(query, media_type),
+        },
+        MetadataSource::Imdb => imdb_search_as_list_items(query, media_type),
+    }
+}
+
+fn cinemeta_search_as_list_items(
+    query: &str,
+    media_type: Option<&str>,
+) -> Result<Vec<TmdbSearchListItem>, Box<dyn std::error::Error + Send + Sync>> {
+    let kinds: Vec<crate::cinemeta_api::CinemetaKind> = match media_type {
+        Some("movie") => vec![crate::cinemeta_api::CinemetaKind::Movie],
+        Some("tv") => vec![crate::cinemeta_api::CinemetaKind::Series],
+        _ => vec![
+            crate::cinemeta_api::CinemetaKind::Movie,
+            crate::cinemeta_api::CinemetaKind::Series,
+        ],
+    };
+
+    let mut out: Vec<TmdbSearchListItem> = Vec::new();
+    for kind in kinds {
+        let titles = crate::cinemeta_api::search(kind, query, 25)?;
+        for t in titles {
+            out.push(cinemeta_title_to_list_item(&t));
+        }
+    }
+    Ok(out)
+}
+
+fn cinemeta_title_to_list_item(t: &crate::cinemeta_api::CinemetaTitle) -> TmdbSearchListItem {
+    let normalized_type = if t.kind == "series" { "tv" } else { "movie" }.to_string();
+    let year_int = parse_year_str(t.year.as_deref());
+    let date_str = year_int.map(|y| format!("{:04}-01-01", y));
+    TmdbSearchListItem {
+        id: t.moviedb_id.unwrap_or_else(|| parse_imdb_id_to_i64(&t.id)),
+        title: Some(t.name.clone()),
+        name: Some(t.name.clone()),
+        media_type: normalized_type,
+        poster_path: t.poster.clone(),
+        backdrop_path: t.background.clone(),
+        overview: t.description.clone(),
+        release_date: date_str.clone(),
+        first_air_date: date_str,
+        vote_average: t.imdb_rating.as_ref().and_then(|s| s.parse::<f64>().ok()),
+        imdb_id: Some(t.id.clone()),
+    }
+}
+
+fn parse_year_str(s: Option<&str>) -> Option<i32> {
+    let s = s?;
+    let digits: String = s.chars().take(4).collect();
+    digits.parse::<i32>().ok()
+}
+
+fn imdb_search_as_list_items(
+    query: &str,
+    media_type: Option<&str>,
+) -> Result<Vec<TmdbSearchListItem>, Box<dyn std::error::Error + Send + Sync>> {
+    let imdb_type = match media_type {
+        Some("movie") => Some("movie"),
+        Some("tv") => Some("tv"),
+        _ => None,
+    };
+    let imdb_results = crate::imdb_api::search_titles(query, imdb_type, 25)
+        .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(e.to_string()))?;
+    Ok(imdb_results
+        .into_iter()
+        .map(|t| {
+            let normalized_type = match t.type_.as_deref() {
+                Some("TV_SERIES") | Some("TV_MINI_SERIES") | Some("TV_SPECIAL") => "tv".to_string(),
+                _ => "movie".to_string(),
+            };
+            let year_str = t.start_year.map(|y| format!("{y}-01-01"));
+            let poster_path = t.primary_image.and_then(|i| i.url);
+            TmdbSearchListItem {
+                id: parse_imdb_id_to_i64(&t.id),
+                title: t.primary_title.clone(),
+                name: t.primary_title.clone(),
+                media_type: normalized_type,
+                poster_path,
+                backdrop_path: None,
+                overview: None,
+                release_date: year_str.clone(),
+                first_air_date: year_str,
+                vote_average: t.rating.as_ref().and_then(|r| r.aggregate_rating),
+                imdb_id: Some(t.id),
+            }
+        })
+        .collect())
+}
+
+fn parse_imdb_id_to_i64(id: &str) -> i64 {
+    id.trim_start_matches("tt")
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse::<i64>()
+        .unwrap_or(0)
+}
+
 /// Fetch top trending movies and TV shows for lightweight UI suggestions.
 pub fn trending_suggestions_raw(
     api_key: &str,
     per_type_limit: usize,
 ) -> Result<Vec<TmdbTrendingListItem>, Box<dyn std::error::Error + Send + Sync>> {
+    if api_key.trim().is_empty() {
+        println!(
+            "[IMDBAPI] trending endpoint not available on imdbapi.dev (api_key empty); returning []"
+        );
+        return Ok(Vec::new());
+    }
+
     #[derive(Debug, Deserialize)]
     struct RawTrendingResult {
         results: Vec<RawTrendingItem>,
@@ -1333,6 +1634,109 @@ pub fn fetch_metadata_by_id(
     Ok(metadata)
 }
 
+/// Same as `fetch_metadata_by_id` but routes to imdbapi.dev when no TMDB
+/// key is configured (the free service only accepts IMDb ids).
+pub fn fetch_metadata_by_id_with_fallback(
+    api_key: &str,
+    id_or_url: &str,
+    media_type: &str,
+    image_cache_dir: &str,
+) -> Result<TmdbMetadata, Box<dyn std::error::Error + Send + Sync>> {
+    let (id, source) = extract_id_from_input(id_or_url);
+
+    match pick_source(api_key) {
+        MetadataSource::Tmdb => fetch_metadata_by_id(api_key, id_or_url, media_type, image_cache_dir),
+        MetadataSource::Cinemeta => {
+            if source != "imdb" {
+                return Err(format!(
+                    "[CINEMETA] cannot resolve numeric id {} without a TMDB key (only IMDb ids)",
+                    id
+                )
+                .into());
+            }
+            let kind = match media_type {
+                "tv" => crate::cinemeta_api::CinemetaKind::Series,
+                _ => crate::cinemeta_api::CinemetaKind::Movie,
+            };
+            if let Ok(meta) = crate::cinemeta_api::get_title(kind, &id) {
+                return fetch_metadata_by_cinemeta_title(&meta, media_type, image_cache_dir);
+            }
+            fetch_metadata_by_imdb_id(&id, media_type, image_cache_dir)
+        }
+        MetadataSource::Imdb => {
+            if source != "imdb" {
+                return Err(format!(
+                    "[IMDBAPI] cannot resolve numeric id {} without a TMDB key (only IMDb ids)",
+                    id
+                )
+                .into());
+            }
+            fetch_metadata_by_imdb_id(&id, media_type, image_cache_dir)
+        }
+    }
+}
+
+fn fetch_metadata_by_imdb_id(
+    imdb_id: &str,
+    media_type: &str,
+    image_cache_dir: &str,
+) -> Result<TmdbMetadata, Box<dyn std::error::Error + Send + Sync>> {
+    let title = crate::imdb_api::get_title(imdb_id).map_err(|e| e.to_string())?;
+
+    let image_type = if media_type == "tv" {
+        ImageType::SeriesBanner
+    } else {
+        ImageType::MovieBanner
+    };
+
+    let poster_path = title
+        .primary_image
+        .as_ref()
+        .and_then(|i| i.url.clone())
+        .and_then(|url| cache_imdb_image(&url, std::path::Path::new(image_cache_dir), &image_type));
+
+    let year = title.start_year.or(title.release_date.as_ref().and_then(|d| d.year));
+
+    let cast_names = title.cast.as_ref().and_then(|c| {
+        let mut v: Vec<String> = c
+            .iter()
+            .filter_map(|n| n.display_name.clone())
+            .filter(|n| !n.trim().is_empty())
+            .take(8)
+            .collect();
+        if v.is_empty() {
+            None
+        } else {
+            Some(v.join(", "))
+        }
+    });
+
+    let director = title
+        .directors
+        .as_ref()
+        .and_then(|ds| ds.iter().find_map(|d| d.display_name.clone()));
+
+    Ok(TmdbMetadata {
+        title: title
+            .primary_title
+            .clone()
+            .or(title.original_title.clone())
+            .unwrap_or_else(|| "Unknown".to_string()),
+        year,
+        overview: title.plot.clone(),
+        cast_names,
+        director,
+        poster_path,
+        tmdb_id: None,
+        imdb_id: Some(title.id.clone()),
+        runtime_seconds: title
+            .runtime_seconds
+            .filter(|s| *s > 0)
+            .map(|s| s as f64),
+        imdb_image_url: title.primary_image.as_ref().and_then(|i| i.url.clone()),
+    })
+}
+
 fn create_metadata_from_item_required(
     item: &TmdbItem,
     image_cache_dir: &str,
@@ -1830,6 +2234,82 @@ pub fn fetch_season_episodes(
     })
 }
 
+/// Like `fetch_season_episodes` but routes by id type:
+/// - `tid` looks like `tt1234567` → imdbapi.dev `/titles/{ttid}/episodes?season=N`
+/// - `tid` is numeric (TMDB id) → TMDB `/tv/{id}/season/{n}` (only when key configured)
+pub fn fetch_season_episodes_with_fallback(
+    api_key: &str,
+    tid: &str,
+    season_number: i32,
+    series_title: &str,
+    image_cache_dir: &str,
+) -> Result<TmdbSeasonInfo, Box<dyn std::error::Error + Send + Sync>> {
+    let trimmed = tid.trim();
+    if crate::imdb_api::looks_like_imdb_id(trimmed) {
+        let eps = crate::imdb_api::list_episodes(trimmed, Some(season_number.max(0) as u32))
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+        let mut poster_path: Option<String> = None;
+        if let Some(url) = crate::imdb_api::get_title(trimmed)
+            .ok()
+            .and_then(|t| t.primary_image.and_then(|i| i.url))
+        {
+            poster_path = cache_imdb_image(
+                &url,
+                std::path::Path::new(image_cache_dir),
+                &ImageType::SeriesBanner,
+            );
+        }
+        let episodes: Vec<TmdbEpisodeInfo> = eps
+            .into_iter()
+            .map(|e| TmdbEpisodeInfo {
+                episode_number: e.episode_number.unwrap_or(0),
+                season_number: season_number,
+                name: e.title.unwrap_or_else(|| "(untitled)".to_string()),
+                overview: e.plot,
+                still_path: e
+                    .primary_image
+                    .and_then(|i| i.url)
+                    .and_then(|url| {
+                        cache_imdb_image(
+                            &url,
+                            std::path::Path::new(image_cache_dir),
+                            &ImageType::EpisodeBanner {
+                                season: season_number,
+                                episode: e.episode_number.unwrap_or(0),
+                            },
+                        )
+                    }),
+                air_date: e
+                    .release_date
+                    .as_ref()
+                    .and_then(|d| {
+                        match (d.year, d.month, d.day) {
+                            (Some(y), Some(m), Some(dd)) => Some(format!("{:04}-{:02}-{:02}", y, m, dd)),
+                            (Some(y), Some(m), None) => Some(format!("{:04}-{:02}", y, m)),
+                            (Some(y), None, None) => Some(y.to_string()),
+                            _ => None,
+                        }
+                    }),
+                vote_average: e.rating.as_ref().and_then(|r| r.aggregate_rating),
+            })
+            .collect();
+        let season_name = format!("Season {}", season_number);
+        return Ok(TmdbSeasonInfo {
+            season_number,
+            name: season_name,
+            overview: None,
+            poster_path,
+            episode_count: episodes.len() as i32,
+            episodes,
+        });
+    }
+
+    if api_key.trim().is_empty() {
+        return Err("[IMDBAPI] cannot resolve TMDB numeric id without an API key".into());
+    }
+    fetch_season_episodes(api_key, trimmed, season_number, series_title, image_cache_dir)
+}
+
 /// Fetch and cache all episode metadata for a TV series
 pub fn fetch_all_series_episodes(
     api_key: &str,
@@ -2322,12 +2802,10 @@ mod tests {
 
     #[test]
     fn build_tmdb_url_with_api_key() {
-        // NOTE: Cannot test env var behavior safely in parallel tests
         let url = build_tmdb_url("/search/movie", "myapikey", "query=Matrix");
         assert!(url.contains("api_key=myapikey"));
         assert!(url.contains("/search/movie"));
         assert!(url.contains("query=Matrix"));
-        std::env::remove_var("STREAMVAULT_TMDB_PROXY_URL");
     }
 
     #[test]
@@ -2339,10 +2817,13 @@ mod tests {
     }
 
     #[test]
-    fn build_tmdb_url_with_backend_proxy() {
-        // NOTE: Cannot test env var routing safely in parallel tests
+    fn build_tmdb_url_with_backend_proxy_removed() {
         let url = build_tmdb_url("/search/movie", "__TMDB_BACKEND_PROXY__", "query=Matrix");
-        assert!(url.contains("/search/movie"));
+        assert!(
+            url.starts_with("https://api.themoviedb.org/3/search/movie"),
+            "TMDP magic credential must NOT be rerouted through onrender.com, got: {}",
+            url
+        );
         assert!(url.contains("query=Matrix"));
     }
 
@@ -3522,11 +4003,10 @@ mod tests {
         assert!(s.episodes.is_empty());
     }
 
-    // ── build_tmdb_url proxy with complex params ───────────────────────
+    // ── build_tmdb_url proxy-style complex params (no longer magic) ───
 
     #[test]
     fn build_tmdb_url_proxy_complex_params() {
-        // NOTE: Cannot test env var routing safely in parallel tests
         let url = build_tmdb_url(
             "/tv/1399",
             "__TMDB_BACKEND_PROXY__",

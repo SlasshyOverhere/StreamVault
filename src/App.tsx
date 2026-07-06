@@ -45,6 +45,8 @@ import {
   clearProgress,
   isBetaEnabled,
   setBetaEnabled,
+  isTmdbKeyNoticeDismissed,
+  setTmdbKeyNoticeDismissed,
   checkForUpdates,
   downloadUpdate,
   installUpdate,
@@ -94,6 +96,7 @@ import {
 } from '@/utils/zipPlayback'
 import slasshyvaultIcon from '@/assets/slasshyvault-icon-ui.png'
 import { CommandPalette } from '@/components/CommandPalette'
+import { TmdbKeyNoticeBanner } from '@/components/TmdbKeyNoticeBanner'
 const FullHistoryView = lazy(() => import('@/components/FullHistoryView').then(m => ({ default: m.FullHistoryView })))
 const DirectLinksView = lazy(() => import('@/components/DirectLinksView').then(m => ({ default: m.default })))
 const RemoteSourceView = lazy(() => import('@/components/RemoteSource/RemoteSourceView').then(m => ({ default: m.RemoteSourceView })))
@@ -514,6 +517,7 @@ function App() {
   const [settingsInitialTab, setSettingsInitialTab] = useState<'general' | 'beta' | 'updates' | 'cloud' | 'api' | 'danger' | 'dev'>('general')
   const [fixMatchOpen, setFixMatchOpen] = useState(false)
   const [itemToFix, setItemToFix] = useState<MediaItem | null>(null)
+  const [showTmdbKeyNotice, setShowTmdbKeyNotice] = useState(false)
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
   const [theme] = useState<'dark' | 'light'>('dark')
   const { toast } = useToast()
@@ -541,6 +545,32 @@ function App() {
     }, 500)
 
     return () => window.clearTimeout(preloadTimer)
+  }, [])
+
+  // On startup, if no TMDB API key is configured and the user hasn't explicitly
+  // dismissed the notice, show a persistent in-page banner with two actions:
+  //   • "Open Settings" — opens the API tab where the key can be entered
+  //   • "Don't show again" — persists dismissal in localStorage
+  useEffect(() => {
+    let cancelled = false
+    const bootstrapTimer = window.setTimeout(async () => {
+      if (isTmdbKeyNoticeDismissed()) return
+      try {
+        const config = await getConfig()
+        if (cancelled) return
+        const hasKey = !!(config.tmdb_api_key && config.tmdb_api_key.trim())
+        if (hasKey) return
+        if (cancelled) return
+        setShowTmdbKeyNotice(true)
+      } catch (error) {
+        console.warn("[TMDB-KEY-NOTICE] failed to check config:", error)
+      }
+    }, 1500)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(bootstrapTimer)
+    }
   }, [])
 
   // Resume dialog state
@@ -3474,6 +3504,20 @@ function App() {
           />
 
           <Toaster />
+
+          {showTmdbKeyNotice && (
+            <TmdbKeyNoticeBanner
+              onOpenSettings={() => {
+                setSettingsInitialTab("api")
+                setSettingsOpen(true)
+                setShowTmdbKeyNotice(false)
+              }}
+              onDismiss={() => {
+                setTmdbKeyNoticeDismissed(true)
+                setShowTmdbKeyNotice(false)
+              }}
+            />
+          )}
 
           <ConfirmDialog
             open={confirmDeleteOpen}

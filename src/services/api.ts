@@ -1039,17 +1039,12 @@ export const searchContent = async (
   year?: number,
   media_type?: string,
 ): Promise<HybridSearchResult[]> => {
-  try {
-    const response = await invoke<{ results: HybridSearchResult[] }>("search_content", {
-      query,
-      year,
-      mediaType: media_type,
-    });
-    return response.results;
-  } catch (error) {
-    console.error("Failed to search content:", error);
-    return [];
-  }
+  const response = await invoke<{ results: HybridSearchResult[] }>("search_content", {
+    query,
+    year,
+    mediaType: media_type,
+  });
+  return response.results;
 };
 
 export const getDownloadJobs = async (): Promise<DownloadJob[]> => {
@@ -1705,10 +1700,12 @@ export interface WatchlistSyncStatus {
 
 export const getMovieDetails = async (
   movieId: number,
+  imdbId?: string | null,
 ): Promise<TmdbMovieDetails | null> => {
   try {
     const details = await invoke<TmdbMovieDetails>("get_movie_details", {
       movieId,
+      imdbId: imdbId ?? null,
     });
     return details;
   } catch (error) {
@@ -1722,12 +1719,14 @@ export const getTmdbReleaseSchedule = async (
   mediaType: "movie" | "tv",
   seasonNumber?: number | null,
   episodeNumber?: number | null,
+  imdbId?: string | null,
 ): Promise<TmdbReleaseSchedule> => {
   return await invoke<TmdbReleaseSchedule>("get_tmdb_release_schedule", {
     tmdbId,
     mediaType,
     seasonNumber: seasonNumber ?? null,
     episodeNumber: episodeNumber ?? null,
+    imdbId: imdbId ?? null,
   });
 };
 
@@ -1838,9 +1837,13 @@ export const syncWatchlist = async (): Promise<WatchlistSyncStatus> => {
 // Get TV show details including seasons from TMDB
 export const getTvDetails = async (
   tvId: number,
+  imdbId?: string | null,
 ): Promise<TmdbShowDetails | null> => {
   try {
-    const details = await invoke<TmdbShowDetails>("get_tv_details", { tvId });
+    const details = await invoke<TmdbShowDetails>("get_tv_details", {
+      tvId,
+      imdbId: imdbId ?? null,
+    });
     return details;
   } catch (error) {
     console.error("Failed to get TV details:", error);
@@ -1852,11 +1855,12 @@ export const getTvDetails = async (
 export const getTvSeasonEpisodes = async (
   tvId: number,
   seasonNumber: number,
+  imdbId?: string | null,
 ): Promise<TmdbSeasonDetails | null> => {
   try {
     const seasonDetails = await invoke<TmdbSeasonDetails>(
       "get_tv_season_episodes",
-      { tvId, seasonNumber },
+      { tvId, seasonNumber, imdbId: imdbId ?? null },
     );
     return seasonDetails;
   } catch (error) {
@@ -2059,8 +2063,33 @@ export const setBetaEnabled = (enabled: boolean): void => {
   }
 };
 
-// ==================== CLOUD CACHE ====================
+// ==================== TMDB KEY NOTICE ====================
 
+const TMDB_KEY_NOTICE_DISMISSED_KEY = "slasshyvault_tmdb_key_notice_dismissed";
+
+// Check if the user has explicitly dismissed the TMDB key setup notice
+export const isTmdbKeyNoticeDismissed = (): boolean => {
+  try {
+    return localStorage.getItem(TMDB_KEY_NOTICE_DISMISSED_KEY) === "true";
+  } catch (error) {
+    console.error("Failed to read TMDB key notice state:", error);
+    return false;
+  }
+};
+
+// Persist dismissal so the notice only shows until the user opts out
+export const setTmdbKeyNoticeDismissed = (dismissed: boolean): void => {
+  try {
+    localStorage.setItem(
+      TMDB_KEY_NOTICE_DISMISSED_KEY,
+      dismissed ? "true" : "false"
+    );
+  } catch (error) {
+    console.error("Failed to save TMDB key notice state:", error);
+  }
+};
+
+// ==================== CLOUD CACHE ====================
 export interface CloudCacheInfo {
   enabled: boolean;
   cache_dir: string | null;
