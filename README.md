@@ -4,7 +4,7 @@ Cloud-first desktop media library. Indexes your Google Drive, enriches with TMDB
 
 ![Tauri](https://img.shields.io/badge/Tauri-v1-blue?style=flat-square)
 ![React](https://img.shields.io/badge/React-18-61DAFB?style=flat-square)
-![Version](https://img.shields.io/badge/version-3.0.59-black?style=flat-square)
+![Version](https://img.shields.io/badge/version-3.0.60-black?style=flat-square)
 
 ## Features
 
@@ -12,6 +12,7 @@ Cloud-first desktop media library. Indexes your Google Drive, enriches with TMDB
 - TMDB metadata, posters, and episode grouping
 - MPV playback with resume and watch history
 - External streaming via addon (direct URL or Go binary)
+- Stremio addon compatibility for connecting to self-hosted media catalogs
 - Archive support (`.zip`, `.rar`)
 - System tray, Windows notifications, toast alerts
 
@@ -58,7 +59,7 @@ Installers output to `src-tauri/target/release/bundle/`.
 
 ## Disclaimer
 
-SlasshyVault does not host, store, or distribute any media content. The "External" tab allows users to connect their own self-hosted addon to search and stream from third-party sources. SlasshyVault does not provide, endorse, or control any addon or its content. Users are solely responsible for compliance with applicable copyright laws in their jurisdiction. The developers assume no liability for misuse.
+SlasshyVault does not host, store, or distribute any media content. SlasshyVault is not affiliated with or endorsed by Stremio. [Stremio](https://www.stremio.com/) is an open-source media center whose addon standard is implemented here as a user convenience — SlasshyVault simply lets users connect their own addons. Users bring their own addons and self-hosted servers. SlasshyVault does not provide, endorse, or control any addon or its content. Users are solely responsible for ensuring their use complies with applicable copyright laws in their jurisdiction. The developers assume no liability for misuse.
 
 ## License
 
