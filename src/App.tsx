@@ -13,6 +13,7 @@ import {
   MarkCompleteDialog,
   WatchTogetherBanner,
   LoginScreen,
+  ReauthBanner,
   ContentDetailsModal,
   ZipPlaybackLoadingOverlay,
   NotificationCenter,
@@ -45,6 +46,8 @@ import {
   clearProgress,
   isBetaEnabled,
   setBetaEnabled,
+  isTmdbKeyNoticeDismissed,
+  setTmdbKeyNoticeDismissed,
   checkForUpdates,
   downloadUpdate,
   installUpdate,
@@ -73,11 +76,12 @@ import {
   Search, Loader2, Film, Tv,
   ChevronRight, LayoutGrid, List,
   TrendingUp, Sparkles, X, Cloud, RefreshCw, Minus, Download, Bell,
-  Maximize2, Minimize2, Archive, AlertCircle, FolderOpen
+  Archive, AlertCircle, FolderOpen
 } from 'lucide-react'
 import { useToast } from '@/components/ui/use-toast'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useAuth } from '@/hooks/useAuth'
+import { useAuthGuard, AuthCancelledError } from '@/hooks/useAuthGuard'
 import { sortMediaItems } from '@/utils/sorting'
 import { sortPinnedFirst } from '@/utils/pins'
 import {
@@ -94,6 +98,7 @@ import {
 } from '@/utils/zipPlayback'
 import slasshyvaultIcon from '@/assets/slasshyvault-icon-ui.png'
 import { CommandPalette } from '@/components/CommandPalette'
+import { TmdbKeyNoticeBanner } from '@/components/TmdbKeyNoticeBanner'
 const FullHistoryView = lazy(() => import('@/components/FullHistoryView').then(m => ({ default: m.FullHistoryView })))
 const DirectLinksView = lazy(() => import('@/components/DirectLinksView').then(m => ({ default: m.default })))
 const RemoteSourceView = lazy(() => import('@/components/RemoteSource/RemoteSourceView').then(m => ({ default: m.RemoteSourceView })))
@@ -396,10 +401,6 @@ function App() {
         case 'ArrowDown':
           invoke('native_mpv_set_volume', { volume: Math.max(0, nativeVolume - 5) })
           break
-        case 'f':
-        case 'F':
-          appWindow.toggleMaximize()
-          break
         case '=':
         case '+':
           setNativeSubScale(s => {
@@ -514,6 +515,7 @@ function App() {
   const [settingsInitialTab, setSettingsInitialTab] = useState<'general' | 'beta' | 'updates' | 'cloud' | 'api' | 'danger' | 'dev'>('general')
   const [fixMatchOpen, setFixMatchOpen] = useState(false)
   const [itemToFix, setItemToFix] = useState<MediaItem | null>(null)
+  const [showTmdbKeyNotice, setShowTmdbKeyNotice] = useState(false)
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
   const [theme] = useState<'dark' | 'light'>('dark')
   const { toast } = useToast()
@@ -541,6 +543,32 @@ function App() {
     }, 500)
 
     return () => window.clearTimeout(preloadTimer)
+  }, [])
+
+  // On startup, if no TMDB API key is configured and the user hasn't explicitly
+  // dismissed the notice, show a persistent in-page banner with two actions:
+  //   • "Open Settings" — opens the API tab where the key can be entered
+  //   • "Don't show again" — persists dismissal in localStorage
+  useEffect(() => {
+    let cancelled = false
+    const bootstrapTimer = window.setTimeout(async () => {
+      if (isTmdbKeyNoticeDismissed()) return
+      try {
+        const config = await getConfig()
+        if (cancelled) return
+        const hasKey = !!(config.tmdb_api_key && config.tmdb_api_key.trim())
+        if (hasKey) return
+        if (cancelled) return
+        setShowTmdbKeyNotice(true)
+      } catch (error) {
+        console.warn("[TMDB-KEY-NOTICE] failed to check config:", error)
+      }
+    }, 1500)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(bootstrapTimer)
+    }
   }, [])
 
   // Resume dialog state
@@ -597,7 +625,12 @@ function App() {
   const [ddlExpiredRefreshing, setDdlExpiredRefreshing] = useState(false)
 
   // Authentication state
-  const { isAuthenticated, isAuthLoading, isLoggingIn, login: handleLogin, logout: handleLogout, showIndexingPrompt, isIndexing, confirmIndexing, declineIndexing } = useAuth()
+  const { state, isAuthenticated, isAuthLoading, isLoggingIn, login: handleLogin, logout: handleLogout, reauth: _handleReauth, needsReauth: _needsReauth, showIndexingPrompt, isIndexing, confirmIndexing, declineIndexing } = useAuth()
+
+  // Write-gate: wraps Drive-mutating operations so that, when the refresh
+  // token is soft_lost, the user is prompted to re-authenticate and the
+  // write only runs after re-auth completes. Read-only reads stay ungated.
+  const { guard: guardDriveWrite } = useAuthGuard()
 
   const mergeDownloadJob = useCallback((job: DownloadJob) => {
     setDownloadJobs((current) => {
@@ -962,11 +995,20 @@ function App() {
 
   const runWatchHistorySync = useCallback(async () => {
     try {
-      await syncWatchHistory()
+      // syncWatchHistory is the only path that mutates the user's watch
+      // history state on Google Drive. Soft_lost guard prompts a re-auth
+      // modal before letting this run.
+      await guardDriveWrite(() => syncWatchHistory())
     } catch (error) {
+      // AuthCancelledError: user dismissed the re-auth modal — silently skip
+      // the sync (local DB write in callers already succeeded; the Drive
+      // sync will just retry later via runWatchHistorySync()).
+      if (error instanceof AuthCancelledError) {
+        return
+      }
       console.error('[History] Sync failed:', error)
     }
-  }, [])
+  }, [guardDriveWrite])
 
   const handleHomeSearch = useCallback(async () => {
     if (!homeSearchQuery.trim()) {
@@ -1504,8 +1546,12 @@ function App() {
 
       // Always scan the entire Google Drive (root recursively covers everything)
       const gdrive = await import('@/services/gdrive')
-      await gdrive.addCloudFolder('root', 'My Drive')
-      const result = await gdrive.scanCloudFolder('root', 'My Drive')
+      // Both calls mutate Drive state (folder tracking + index write).
+      // Soft_lost guard prompts re-auth before letting either run.
+      const result = await guardDriveWrite(async () => {
+        await gdrive.addCloudFolder('root', 'My Drive')
+        return gdrive.scanCloudFolder('root', 'My Drive')
+      })
 
       if (result.indexed_count > 0) {
         setCloudIndexingStatus(`✓ Added ${result.indexed_count} new files!`)
@@ -2194,9 +2240,10 @@ function App() {
         </div>
       )}
       {/* Show login screen if not authenticated */}
-      {!isAuthenticated && !isAuthLoading && (
+      {state === 'unauthenticated' && !isAuthLoading && (
         <LoginScreen onLogin={handleLogin} isLoading={isLoggingIn} />
       )}
+      <ReauthBanner />
 
       {/* Show loading state while checking auth */}
       {isAuthLoading && (
@@ -2349,13 +2396,7 @@ function App() {
                     ))}
                   </select>
 
-                  {/* Fullscreen */}
-                  <button
-                    onClick={() => appWindow.toggleMaximize()}
-                    className="pointer-events-auto text-white/70 hover:text-white transition-colors"
-                  >
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
-                  </button>
+                  {/* (Fullscreen button removed — app cannot be maximized/full-screened) */}
                 </div>
               </div>
             </div>
@@ -2368,10 +2409,6 @@ function App() {
               <div className="absolute top-0 left-0 right-0 h-1.5" />
               <div
                 data-tauri-drag-region
-                onDoubleClick={async () => {
-                  await appWindow.toggleMaximize()
-                  await refreshWindowState()
-                }}
                 className="absolute left-0 top-1.5 bottom-0 right-[120px]"
               />
               <div className="flex items-center gap-2 pl-3 select-none">
@@ -2396,19 +2433,6 @@ function App() {
                   aria-label="Minimize window"
                 >
                   <Minus className="mx-auto size-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    await appWindow.toggleMaximize()
-                    await refreshWindowState()
-                  }}
-                  onDoubleClick={(event) => event.stopPropagation()}
-                  className="h-7 w-8 rounded-md border border-transparent text-neutral-400 transition-colors hover:border-white/10 hover:bg-white/10 hover:text-white"
-                  title={isMaximized ? "Restore" : "Maximize"}
-                  aria-label={isMaximized ? "Restore window" : "Maximize window"}
-                >
-                  {isMaximized ? <Minimize2 className="mx-auto size-3.5" /> : <Maximize2 className="mx-auto size-3.5" />}
                 </button>
                 <button
                   type="button"
@@ -3474,6 +3498,20 @@ function App() {
           />
 
           <Toaster />
+
+          {showTmdbKeyNotice && (
+            <TmdbKeyNoticeBanner
+              onOpenSettings={() => {
+                setSettingsInitialTab("api")
+                setSettingsOpen(true)
+                setShowTmdbKeyNotice(false)
+              }}
+              onDismiss={() => {
+                setTmdbKeyNoticeDismissed(true)
+                setShowTmdbKeyNotice(false)
+              }}
+            />
+          )}
 
           <ConfirmDialog
             open={confirmDeleteOpen}

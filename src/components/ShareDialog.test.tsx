@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { ShareDialog } from './ShareDialog'
 
 vi.mock('@/components/ui/dialog', () => ({
@@ -31,6 +31,20 @@ vi.mock('@/services/gdrive', () => ({
   shareGDriveFile: vi.fn().mockResolvedValue({ success: true, message: 'ok' }),
 }))
 
+// Mock useAuthGuard so the regression test can shape state ('valid' / 'soft_lost' / 'unauthenticated')
+// and decide whether the guard condition runs the wrapped function.
+const guardImpl = vi.fn(async (fn: () => Promise<unknown>) => fn())
+vi.mock('@/hooks/useAuthGuard', () => ({
+  useAuthGuard: () => ({
+    needsReauth: false,
+    guard: guardImpl,
+    modalOpen: false,
+    onModalReauth: vi.fn(),
+    onModalClose: vi.fn(),
+  }),
+  AuthCancelledError: class AuthCancelledError extends Error {},
+}))
+
 vi.mock('lucide-react', () => ({
   Mail: () => <span />,
   Send: () => <span />,
@@ -38,6 +52,14 @@ vi.mock('lucide-react', () => ({
   Loader2: () => <span />,
   Shield: () => <span />,
 }))
+
+import { shareGDriveFile } from '@/services/gdrive'
+
+beforeEach(() => {
+  vi.resetAllMocks()
+  vi.mocked(shareGDriveFile).mockResolvedValue({ success: true, message: 'ok' } as any)
+  guardImpl.mockImplementation(async (fn: () => Promise<unknown>) => fn())
+})
 
 describe('ShareDialog', () => {
   const baseProps = {
@@ -87,5 +109,41 @@ describe('ShareDialog', () => {
   it('displays file name in description', () => {
     render(<ShareDialog {...baseProps} />)
     expect(screen.getByText(/test\.mp4/)).toBeTruthy()
+  })
+
+  // ── Regression: Drive-write gate ────────────────────────────────────────
+  // ShareDialog wraps the shareGDriveFile Drive write in useAuthGuard.guard().
+  // This regression asserts that the wrapped function only executes through
+  // guard() — i.e. when useAuth is in soft_lost, the reauth resolution order
+  // matters and shareGDriveFile is NOT called until guard() decides to run it.
+  it('drives shareGDriveFile through guard() so re-auth can intercept soft_lost', async () => {
+    render(<ShareDialog {...baseProps} />)
+    const input = screen.getByPlaceholderText('person@example.com') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'a@b.com' } })
+    const btn = screen.getByText('Share') as HTMLButtonElement
+    fireEvent.click(btn)
+
+    await waitFor(() => expect(guardImpl).toHaveBeenCalled())
+    await waitFor(() => expect(shareGDriveFile).toHaveBeenCalledWith(
+      'file123', 'a@b.com', 'reader',
+    ))
+    expect(shareGDriveFile).toHaveBeenCalledOnce()
+  })
+
+  it('does not call shareGDriveFile when guard rejects with AuthCancelledError', async () => {
+    // Simulate "user dismissed the re-auth modal" — guard throws
+    // AuthCancelledError before running the wrapped share write.
+    guardImpl.mockImplementation(async () => {
+      throw new Error('reauth_cancelled')
+    })
+
+    render(<ShareDialog {...baseProps} />)
+    const input = screen.getByPlaceholderText('person@example.com') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'a@b.com' } })
+    fireEvent.click(screen.getByText('Share') as HTMLButtonElement)
+
+    await waitFor(() => expect(guardImpl).toHaveBeenCalled())
+    // The wrapped share write must NOT have run on a cancelled re-auth.
+    expect(shareGDriveFile).not.toHaveBeenCalled()
   })
 })

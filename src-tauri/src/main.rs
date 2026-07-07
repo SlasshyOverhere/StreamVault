@@ -8,10 +8,13 @@ mod direct_link_manager;
 mod download_manager;
 mod http_client;
 mod gdrive;
+mod gdrive_stream_proxy;
 mod log_buffer;
 mod media_manager;
 mod mpv_ipc;
 mod cf_relay;
+mod cinemeta_api;
+mod imdb_api;
 mod tmdb;
 mod transcoder;
 mod watch_together;
@@ -21,6 +24,7 @@ mod zip_parser;
 mod zip_stream_proxy;
 mod remote_stream_proxy;
 mod remote_source;
+mod stremio;
 
 mod stream_cache;
 
@@ -72,6 +76,7 @@ pub struct MpvSession {
 pub struct ActiveMpvSession {
     pub session: MpvSession,
     pub zip_proxy: Option<zip_stream_proxy::ZipStreamProxyHandle>,
+    pub gdrive_stream_proxy: Option<gdrive_stream_proxy::GdriveStreamProxyHandle>,
 }
 
 pub struct ActiveZipStream {
@@ -94,6 +99,7 @@ pub struct AppState {
     pub oauth_nonce: Arc<Mutex<Option<String>>>,
     pub cache_manager: stream_cache::CacheManager,
     pub last_validation_report: Mutex<Option<database::SyncValidationReport>>,
+    pub gdrive_refresh_watchdog: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
 }
 
 /// RAII guard that prevents concurrent cloud folder scans.
@@ -625,6 +631,16 @@ async fn gdrive_get_access_token(state: State<'_, AppState>) -> Result<String, S
     state.gdrive_client.get_access_token().await
 }
 
+/// Lightweight snapshot of the OAuth session for the JS auth-state hook.
+/// Returns token presence plus the most-recent permanent refresh failure
+/// so the UI can distinguish fully-signed-in from refresh-lost-but-library-ok.
+#[tauri::command]
+async fn gdrive_get_auth_status(
+    state: State<'_, AppState>,
+) -> Result<gdrive::GDriveAuthStatus, String> {
+    Ok(state.gdrive_client.get_auth_status())
+}
+
 /// Get Google Drive account info
 #[tauri::command]
 async fn gdrive_get_account_info(
@@ -685,6 +701,22 @@ async fn gdrive_complete_auth(
 
     // Get and return account info
     state.gdrive_client.get_account_info().await
+}
+
+/// Abort the GDrive refresh watchdog JoinHandle if present. Used on app
+/// exit to ensure the background 25-min polling task is cancelled cleanly
+/// rather than lingering until the tokio runtime itself drops.
+fn abort_gdrive_refresh_watchdog(app_handle: &AppHandle) {
+    if let Ok(mut h) = app_handle
+        .state::<AppState>()
+        .gdrive_refresh_watchdog
+        .lock()
+    {
+        if let Some(handle) = h.take() {
+            println!("[EXIT] Aborting GDrive refresh watchdog");
+            handle.abort();
+        }
+    }
 }
 
 /// Disconnect from Google Drive
@@ -1139,9 +1171,8 @@ async fn gdrive_scan_folder(
                                 episode_parent_folder.clone(),
                             )
                         } else {
-                        // Search TMDB for the show (only once per show)
-                        println!("[CLOUD] Searching TMDB for show: {}", show_title);
-                        let mut tmdb_result = tmdb::search_metadata(
+                        println!("[CLOUD] Searching metadata for show: {}", show_title);
+                        let mut tmdb_result = tmdb::search_metadata_with_fallback(
                             &api_key,
                             &show_title,
                             "tv",
@@ -1297,9 +1328,8 @@ async fn gdrive_scan_folder(
                 );
 
             } else {
-                // Index as movie
-                println!("[CLOUD] Searching TMDB for movie: {}", parsed.title);
-                let mut tmdb_result = tmdb::search_metadata(
+                println!("[CLOUD] Searching metadata for movie: {}", parsed.title);
+                let mut tmdb_result = tmdb::search_metadata_with_fallback(
                     &api_key,
                     &parsed.title,
                     "movie",
@@ -1747,7 +1777,7 @@ async fn scan_all_cloud_folders(
                                     folder_id_clone.clone(),
                                 )
                             } else {
-                                let tmdb_result = tmdb::search_metadata(
+                                let tmdb_result = tmdb::search_metadata_with_fallback(
                                     &api_key,
                                     &show_title,
                                     "tv",
@@ -1874,7 +1904,7 @@ async fn scan_all_cloud_folders(
                     indexed_count += 1;
                     tv_count += 1;
                 } else {
-                    let tmdb_result = tmdb::search_metadata(
+                    let tmdb_result = tmdb::search_metadata_with_fallback(
                         &api_key,
                         &parsed.title,
                         "movie",
@@ -2754,12 +2784,12 @@ async fn check_cloud_changes(
                             let show_meta = if let Some(cached) = tv_metadata_cache.get(&title_lower) {
                                 cached.clone()
                             } else {
-                                println!("[CLOUD CHANGES BG]   Searching TMDB for show '{}'...", title);
-                                let meta = tmdb::search_metadata(&api_key, &title, "tv", year, &image_cache_dir_bg).ok().flatten();
+                                println!("[CLOUD CHANGES BG]   Searching metadata for show '{}'...", title);
+                                let meta = tmdb::search_metadata_with_fallback(&api_key, &title, "tv", year, &image_cache_dir_bg).ok().flatten();
                                 if meta.is_some() {
                                     println!("[CLOUD CHANGES BG]   ✓ Found show metadata");
                                 } else {
-                                    println!("[CLOUD CHANGES BG]   ✗ Show not found on TMDB");
+                                    println!("[CLOUD CHANGES BG]   ✗ Show metadata not found");
                                 }
                                 tv_metadata_cache.insert(title_lower.clone(), meta.clone());
                                 meta
@@ -2821,9 +2851,8 @@ async fn check_cloud_changes(
                                 }
                             }
                         } else {
-                            // Movie metadata
                             println!("[CLOUD CHANGES BG] Processing movie '{}'...", title);
-                            match tmdb::search_metadata(&api_key, &title, "movie", year, &image_cache_dir_bg) {
+                            match tmdb::search_metadata_with_fallback(&api_key, &title, "movie", year, &image_cache_dir_bg) {
                                 Ok(Some(meta)) => {
                                     let mut movie_meta = meta;
                                     movie_meta.title = media_manager::prefer_title_with_leading_article(&title, &movie_meta.title);
@@ -2834,7 +2863,7 @@ async fn check_cloud_changes(
                                     }
                                 }
                                 Ok(None) => {
-                                    println!("[CLOUD CHANGES BG]   ✗ Movie not found on TMDB");
+                                    println!("[CLOUD CHANGES BG]   ✗ Movie metadata not found");
                                 }
                                 Err(e) => {
                                     println!("[CLOUD CHANGES BG]   ✗ TMDB search error: {}", e);
@@ -6496,10 +6525,11 @@ async fn play_with_mpv(
 
     let is_ddl_media = media.ddl_source_id.is_some();
 
-    let (playback_url, auth_header, zip_proxy, playback_is_cloud): (
+    let (playback_url, auth_header, zip_proxy, gdrive_proxy, playback_is_cloud): (
         String,
         Option<String>,
         Option<zip_stream_proxy::ZipStreamProxyHandle>,
+        Option<gdrive_stream_proxy::GdriveStreamProxyHandle>,
         bool,
     ) = if is_ddl_media && is_zip_media {
         // Direct Download Link media — use ProxyAuth::None
@@ -6568,7 +6598,7 @@ async fn play_with_mpv(
                                 "[DDL] Using local complete cache for MPV: '{}' -> {}",
                                 media.title, local_path
                             );
-                            (local_path, None, Some(proxy), false)
+                            (local_path, None, Some(proxy), None, false)
                         } else {
                             println!(
                                 "[DDL] Using streaming proxy with partial cache: '{}' -> {}",
@@ -6579,6 +6609,7 @@ async fn play_with_mpv(
                                 zip_stream_proxy::localhost_stream_url(proxy.port),
                                 None,
                                 Some(proxy),
+                                None,
                                 true,
                             )
                         }
@@ -6592,13 +6623,14 @@ async fn play_with_mpv(
                             zip_stream_proxy::localhost_stream_url(proxy.port),
                             None,
                             Some(proxy),
+                            None,
                             true,
                         )
                     }
                 } else {
                     // Compressed ZIP — extract first, then play locally
                     let extracted_path = build_zip_extracted_path(&state, &media).await?;
-                    (extracted_path, None, None, false)
+                    (extracted_path, None, None, None, false)
                 }
             }
             _ => {
@@ -6612,6 +6644,7 @@ async fn play_with_mpv(
                     zip_stream_proxy::localhost_stream_url(proxy.port),
                     None,
                     Some(proxy),
+                    None,
                     true,
                 )
             }
@@ -6634,11 +6667,11 @@ async fn play_with_mpv(
                     } else {
                         "extracted "
                     },
-                    media.title,
-                    extracted_path
-                );
-                (extracted_path, None, None, false)
-            } else {
+                        media.title,
+                        extracted_path
+                    );
+                    (extracted_path, None, None, None, false)
+                } else {
                 match archive_manager::archive_format_for_media(&media) {
                     archive_manager::ArchiveFormat::Zip => match zip_compression_method
                         .unwrap_or_default()
@@ -6708,6 +6741,7 @@ async fn play_with_mpv(
                                         zip_stream_proxy::localhost_stream_url(proxy.port),
                                         None,
                                         Some(proxy),
+                                        None,
                                         true,
                                     )
                                 } else {
@@ -6721,7 +6755,7 @@ async fn play_with_mpv(
                                         media.title,
                                         local_path
                                     );
-                                    (local_path, None, Some(proxy), false)
+                                    (local_path, None, Some(proxy), None, false)
                                 }
                             } else {
                                 println!(
@@ -6733,13 +6767,14 @@ async fn play_with_mpv(
                                     zip_stream_proxy::localhost_stream_url(proxy.port),
                                     None,
                                     Some(proxy),
+                                    None,
                                     true,
                                 )
                             }
                         }
                         8 => {
                             let extracted_path = build_zip_extracted_path(&state, &media).await?;
-                            (extracted_path, None, None, false)
+                            (extracted_path, None, None, None, false)
                         }
                         method => {
                             return Err(format!(
@@ -6755,21 +6790,29 @@ async fn play_with_mpv(
                             "[ARCHIVE] Using direct proxy passthrough for MPV: '{}' -> {}",
                             media.title, stream_url
                         );
-                        (stream_url, None, Some(proxy), true)
+                        (stream_url, None, Some(proxy), None, true)
                     }
                 }
             }
         } else {
-            // Cloud non-ZIP file - direct Google Drive streaming (matches v3.0.39 behavior)
+            // Cloud non-ZIP file: route through the GDrive stream proxy so MPV
+            // never bakes a long-lived token into its --http-header-fields. The
+            // proxy signs each upstream request with the live token (refreshes
+            // on 401), so 2-hour movies no longer break mid-playback when the
+            // initial access_token expires.
             if let Some(ref cloud_file_id) = media.cloud_file_id {
-                let (stream_url, access_token) =
-                    state.gdrive_client.get_stream_url(cloud_file_id).await?;
-                let auth_header = format!("Authorization: Bearer {}", access_token);
+                let proxy = gdrive_stream_proxy::start_gdrive_stream_proxy(
+                    state.gdrive_client.clone(),
+                    cloud_file_id.clone(),
+                )
+                .await?;
+                let proxy_url = proxy.localhost_url();
                 println!(
-                    "[MPV] Using direct Google Drive stream for cloud playback, token length: {}",
-                    access_token.len()
+                    "[MPV] Routing cloud playback through GDrive stream proxy at {} for file_id={}",
+                    proxy_url,
+                    cloud_file_id
                 );
-                (stream_url, Some(auth_header), None, true)
+                (proxy_url, None, None, Some(proxy), true)
             } else {
                 return Err("Cloud file ID not found".to_string());
             }
@@ -6788,7 +6831,7 @@ async fn play_with_mpv(
             ));
         }
 
-        (file_path, None, None, false)
+        (file_path, None, None, None, false)
     };
 
     config::validate_executable_path(&mpv_path, "mpv")?;
@@ -6887,7 +6930,7 @@ async fn play_with_mpv(
             .lock()
             .map_err(|e| e.to_string())?;
         sessions.insert(
-            media_id,
+             media_id,
             ActiveMpvSession {
                 session: MpvSession {
                     media_id,
@@ -6896,6 +6939,7 @@ async fn play_with_mpv(
                     start_time: chrono::Utc::now().timestamp(),
                 },
                 zip_proxy,
+                gdrive_stream_proxy: gdrive_proxy,
             },
         );
     }
@@ -6980,6 +7024,9 @@ async fn play_with_mpv(
                 if let Some(mut session) = sessions.remove(&media_id) {
                     if let Some(proxy) = session.zip_proxy.as_mut() {
                         proxy.stop();
+                    }
+                    if let Some(stream_proxy) = session.gdrive_stream_proxy.as_mut() {
+                        stream_proxy.stop();
                     }
                 }
             };
@@ -7106,17 +7153,26 @@ async fn get_mpv_status(
 
             // If not running, remove from active sessions
             if !is_running {
-                let proxy = {
+                let (zip_proxy, gdrive_proxy) = {
                     let mut sessions = state
                         .active_mpv_sessions
                         .lock()
                         .map_err(|e| e.to_string())?;
-                    sessions
-                        .remove(&media_id)
-                        .and_then(|mut s| s.zip_proxy.take())
-                };
-                if let Some(proxy) = proxy {
-                    let _ = stop_zip_proxy_handle_blocking(proxy).await;
+                    sessions.remove(&media_id).map(|mut s| {
+                        (s.zip_proxy.take(), s.gdrive_stream_proxy.take())
+                    })
+                }
+                .unwrap_or((None, None));
+                if let Some(zip) = zip_proxy {
+                    let _ = stop_zip_proxy_handle_blocking(zip).await;
+                }
+                if let Some(gdrv) = gdrive_proxy {
+                    println!(
+                        "[GDRIVE-PROXY] Stopping cloud-playback proxy for media {}",
+                        media_id
+                    );
+                    gdrv.stop();
+                    drop(gdrv);
                 }
             }
 
@@ -7690,11 +7746,35 @@ struct TvSeasonDetails {
 async fn get_movie_details(
     state: State<'_, AppState>,
     movie_id: i64,
+    imdb_id: Option<String>,
 ) -> Result<MovieDetails, String> {
     let credential = {
         let config = state.config.lock().map_err(|e| e.to_string())?;
         tmdb::get_tmdb_credential(&config.tmdb_api_key.clone().unwrap_or_default())
     };
+
+    if credential.trim().is_empty() {
+        return tokio::task::spawn_blocking(move || -> Result<MovieDetails, String> {
+            let imdb_id = imdb_id.clone().or_else(|| {
+                if movie_id > 0 {
+                    Some(format!("tt{:07}", movie_id))
+                } else {
+                    None
+                }
+            });
+            if let Some(tt) = imdb_id.as_deref() {
+                if let Ok(meta) = cinemeta_api::get_title(cinemeta_api::CinemetaKind::Movie, tt) {
+                    return Ok(cinemeta_to_movie_details(&meta));
+                }
+                if let Ok(meta) = imdb_api::get_title(tt) {
+                    return Ok(imdb_to_movie_details(&meta));
+                }
+            }
+            Err("[IMDB] no api_key and no IMDb id — cannot fetch details".into())
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    }
 
     let url = build_tmdb_api_url(
         &format!("/movie/{}", movie_id),
@@ -7822,12 +7902,247 @@ async fn verify_stream_urls(urls: Vec<String>) -> Result<std::collections::HashM
     Ok(results)
 }
 
+fn cinemeta_to_movie_details(t: &cinemeta_api::CinemetaTitle) -> MovieDetails {
+    let runtime = t
+        .runtime
+        .as_deref()
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|n| n.parse::<i32>().ok());
+    let director = t.director.clone().and_then(|v| v.into_iter().next());
+    MovieDetails {
+        id: t.moviedb_id.unwrap_or_else(|| {
+            t.id.trim_start_matches("tt")
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse::<i64>()
+                .unwrap_or(0)
+        }),
+        title: t.name.clone(),
+        poster_path: t.poster.clone(),
+        backdrop_path: t.background.clone(),
+        overview: t.description.clone(),
+        release_date: t.released.clone().or_else(|| t.year.clone()),
+        runtime,
+        director,
+        vote_average: t.imdb_rating.as_ref().and_then(|s| s.parse::<f64>().ok()),
+        imdb_id: t.imdb_id.clone().or_else(|| Some(t.id.clone())),
+    }
+}
+
+fn imdb_to_movie_details(t: &imdb_api::ImdbTitle) -> MovieDetails {
+    let runtime = t.runtime_seconds.filter(|s| *s > 0).map(|s| s / 60);
+    MovieDetails {
+        id: t.id
+            .trim_start_matches("tt")
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse::<i64>()
+            .unwrap_or(0),
+        title: t
+            .primary_title
+            .clone()
+            .or_else(|| t.original_title.clone())
+            .unwrap_or_else(|| "Unknown".to_string()),
+        poster_path: t.primary_image.as_ref().and_then(|i| i.url.clone()),
+        backdrop_path: None,
+        overview: t.plot.clone(),
+        release_date: t.release_date.as_ref().and_then(|d| match (d.year, d.month, d.day) {
+            (Some(y), Some(m), Some(dd)) => Some(format!("{:04}-{:02}-{:02}", y, m, dd)),
+            (Some(y), Some(m), None) => Some(format!("{:04}-{:02}", y, m)),
+            (Some(y), None, _) => Some(format!("{:04}", y)),
+            _ => None,
+        }),
+        runtime,
+        director: t
+            .directors
+            .as_ref()
+            .and_then(|d| d.iter().find_map(|n| n.display_name.clone())),
+        vote_average: t.rating.as_ref().and_then(|r| r.aggregate_rating),
+        imdb_id: Some(t.id.clone()),
+    }
+}
+
+fn cinemeta_to_tv_details(t: &cinemeta_api::CinemetaTitle) -> TvShowDetails {
+    let videos = t.videos.clone().unwrap_or_default();
+    let mut seasons: Vec<TvSeasonInfo> = Vec::new();
+    let mut last_episode: Option<RawAirEpisodeShape> = None;
+    let mut next_episode: Option<RawAirEpisodeShape> = None;
+    let mut total_episodes: i32 = 0;
+    for v in &videos {
+        if let Some(s) = v.season {
+            if s > 0 {
+                total_episodes += 1;
+                if last_episode.is_none()
+                    || v.episode.unwrap_or(0) > last_episode.as_ref().unwrap().episode_number
+                {
+                    last_episode = Some(RawAirEpisodeShape {
+                        season_number: v.season,
+                        episode_number: v.episode.unwrap_or(v.number.unwrap_or(0)),
+                        name: v.name.clone(),
+                        overview: v.overview.clone().or_else(|| v.description.clone()),
+                        still_path: v.thumbnail.clone(),
+                        air_date: v.released.clone().or_else(|| v.first_aired.clone()),
+                        runtime: None,
+                        vote_average: v.rating.as_ref().and_then(|r| r.parse().ok()),
+                    });
+                }
+            }
+        }
+    }
+    if seasons.is_empty() {
+        let mut by_season: std::collections::BTreeMap<i32, Vec<RawAirEpisodeShape>> =
+            std::collections::BTreeMap::new();
+        for v in &videos {
+            if let Some(s) = v.season {
+                let entry = by_season.entry(s).or_default();
+                entry.push(RawAirEpisodeShape {
+                    season_number: v.season,
+                    episode_number: v.episode.unwrap_or(v.number.unwrap_or(0)),
+                    name: v.name.clone(),
+                    overview: v.overview.clone().or_else(|| v.description.clone()),
+                    still_path: v.thumbnail.clone(),
+                    air_date: v.released.clone().or_else(|| v.first_aired.clone()),
+                    runtime: None,
+                    vote_average: v.rating.as_ref().and_then(|r| r.parse().ok()),
+                });
+            }
+        }
+        for (s, eps) in by_season {
+            let name = format!("Season {}", s);
+            let ep_count = eps.len() as i32;
+            seasons.push(TvSeasonInfo {
+                season_number: s,
+                name,
+                episode_count: ep_count,
+                overview: None,
+                poster_path: None,
+                air_date: None,
+            });
+        }
+    } else {
+        let mut by_season: std::collections::BTreeMap<i32, Vec<RawAirEpisodeShape>> =
+            std::collections::BTreeMap::new();
+        for v in &videos {
+            if let Some(s) = v.season {
+                if s == 0 {
+                    continue;
+                }
+                by_season.entry(s).or_default().push(RawAirEpisodeShape {
+                    season_number: v.season,
+                    episode_number: v.episode.unwrap_or(v.number.unwrap_or(0)),
+                    name: v.name.clone(),
+                    overview: v.overview.clone().or_else(|| v.description.clone()),
+                    still_path: v.thumbnail.clone(),
+                    air_date: v.released.clone().or_else(|| v.first_aired.clone()),
+                    runtime: None,
+                    vote_average: v.rating.as_ref().and_then(|r| r.parse().ok()),
+                });
+            }
+        }
+        seasons.clear();
+        for (s, eps) in by_season {
+            let name = format!("Season {}", s);
+            seasons.push(TvSeasonInfo {
+                season_number: s,
+                name,
+                episode_count: eps.len() as i32,
+                overview: None,
+                poster_path: None,
+                air_date: None,
+            });
+        }
+    }
+    let map_to_ep = |e: RawAirEpisodeShape| TvEpisodeInfo {
+        season_number: e.season_number,
+        episode_number: e.episode_number,
+        name: e.name.unwrap_or_else(|| format!("Episode {}", e.episode_number)),
+        overview: e.overview,
+        still_path: e.still_path,
+        air_date: e.air_date,
+        runtime: e.runtime,
+        vote_average: e.vote_average,
+    };
+    TvShowDetails {
+        id: t.moviedb_id.unwrap_or_else(|| {
+            t.id.trim_start_matches("tt")
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse::<i64>()
+                .unwrap_or(0)
+        }),
+        name: t.name.clone(),
+        poster_path: t.poster.clone(),
+        backdrop_path: t.background.clone(),
+        overview: t.description.clone(),
+        first_air_date: t.released.clone().or_else(|| t.year.clone()),
+        status: t.status.clone(),
+        number_of_episodes: Some(total_episodes),
+        number_of_seasons: seasons.len() as i32,
+        seasons,
+        creator: None,
+        last_episode_to_air: last_episode.map(|e| map_to_ep(e.clone())),
+        next_episode_to_air: next_episode.map(map_to_ep),
+    }
+}
+
+#[derive(Clone)]
+struct RawAirEpisodeShape {
+    season_number: Option<i32>,
+    episode_number: i32,
+    name: Option<String>,
+    overview: Option<String>,
+    still_path: Option<String>,
+    air_date: Option<String>,
+    runtime: Option<i32>,
+    vote_average: Option<f64>,
+}
+
+fn imdb_to_tv_details(t: &imdb_api::ImdbTitle) -> TvShowDetails {
+    let runtime = t.runtime_seconds.filter(|s| *s > 0).map(|s| s / 60);
+    TvShowDetails {
+        id: t.id
+            .trim_start_matches("tt")
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse::<i64>()
+            .unwrap_or(0),
+        name: t
+            .primary_title
+            .clone()
+            .or_else(|| t.original_title.clone())
+            .unwrap_or_else(|| "Unknown".to_string()),
+        poster_path: t.primary_image.as_ref().and_then(|i| i.url.clone()),
+        backdrop_path: None,
+        overview: t.plot.clone(),
+        first_air_date: t.release_date.as_ref().and_then(|d| match (d.year, d.month, d.day) {
+            (Some(y), Some(m), Some(dd)) => Some(format!("{:04}-{:02}-{:02}", y, m, dd)),
+            (Some(y), Some(m), None) => Some(format!("{:04}-{:02}", y, m)),
+            (Some(y), None, _) => Some(format!("{:04}", y)),
+            _ => None,
+        }),
+        status: None,
+        number_of_episodes: None,
+        number_of_seasons: 0,
+        seasons: Vec::new(),
+        creator: None,
+        last_episode_to_air: None,
+        next_episode_to_air: None,
+    }
+}
+
 #[tauri::command]
 async fn resolve_imdb_id(state: State<'_, AppState>, tmdb_id: i64, media_type: String) -> Result<Option<String>, String> {
     let api_key = {
         let config = state.config.lock().map_err(|e| e.to_string())?;
         config.tmdb_api_key.clone().unwrap_or_default()
     };
+    if api_key.trim().is_empty() {
+        return Ok(None);
+    }
     let result = tokio::task::spawn_blocking(move || {
         tmdb::fetch_imdb_id(&api_key, tmdb_id, &media_type)
     }).await.map_err(|e| e.to_string())?;
@@ -7836,11 +8151,38 @@ async fn resolve_imdb_id(state: State<'_, AppState>, tmdb_id: i64, media_type: S
 
 // Get TV show details including seasons
 #[tauri::command]
-async fn get_tv_details(state: State<'_, AppState>, tv_id: i64) -> Result<TvShowDetails, String> {
+async fn get_tv_details(
+    state: State<'_, AppState>,
+    tv_id: i64,
+    imdb_id: Option<String>,
+) -> Result<TvShowDetails, String> {
     let credential = {
         let config = state.config.lock().map_err(|e| e.to_string())?;
         tmdb::get_tmdb_credential(&config.tmdb_api_key.clone().unwrap_or_default())
     };
+
+    if credential.trim().is_empty() {
+        return tokio::task::spawn_blocking(move || -> Result<TvShowDetails, String> {
+            let imdb_id = imdb_id.clone().or_else(|| {
+                if tv_id > 0 {
+                    Some(format!("tt{:07}", tv_id))
+                } else {
+                    None
+                }
+            });
+            if let Some(tt) = imdb_id.as_deref() {
+                if let Ok(meta) = cinemeta_api::get_title(cinemeta_api::CinemetaKind::Series, tt) {
+                    return Ok(cinemeta_to_tv_details(&meta));
+                }
+                if let Ok(meta) = imdb_api::get_title(tt) {
+                    return Ok(imdb_to_tv_details(&meta));
+                }
+            }
+            Err("[IMDB] no api_key and no IMDb id — cannot fetch TV details".into())
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    }
 
     let url = build_tmdb_api_url(&format!("/tv/{}", tv_id), &credential, "");
 
@@ -7958,6 +8300,7 @@ async fn get_tv_season_episodes(
     state: State<'_, AppState>,
     tv_id: i64,
     season_number: i32,
+    imdb_id: Option<String>,
 ) -> Result<TvSeasonDetails, String> {
     // First, try to get from local cache
     let tv_id_str = tv_id.to_string();
@@ -7997,16 +8340,70 @@ async fn get_tv_season_episodes(
         }
     }
 
-    // Cache miss - fetch from TMDB API
     println!(
-        "[TMDB] Cache miss, fetching from API for TV {} Season {}",
-        tv_id, season_number
+        "[TV EPISODES] Cache miss, fetching season {} for TV {}",
+        season_number, tv_id
     );
 
     let credential = {
         let config = state.config.lock().map_err(|e| e.to_string())?;
         tmdb::get_tmdb_credential(&config.tmdb_api_key.clone().unwrap_or_default())
     };
+
+    if credential.trim().is_empty() {
+        let resolved_imdb_id = imdb_id
+            .clone()
+            .or_else(|| {
+                let db = state.db.lock().ok()?;
+                db.find_media_by_tmdb(&tv_id.to_string(), "tvshow")
+                    .ok()
+                    .flatten()
+                    .and_then(|m| m.imdb_id)
+            })
+            .or_else(|| {
+                if tv_id > 0 {
+                    Some(format!("tt{:07}", tv_id))
+                } else {
+                    None
+                }
+            });
+        if let Some(tt) = resolved_imdb_id.as_deref() {
+            if let Ok(meta) = cinemeta_api::get_title(cinemeta_api::CinemetaKind::Series, tt) {
+                let mut episodes: Vec<TvEpisodeInfo> = Vec::new();
+                for v in meta.videos.unwrap_or_default() {
+                    if v.season == Some(season_number) {
+                        episodes.push(TvEpisodeInfo {
+                            season_number: Some(season_number),
+                            episode_number: v.episode.unwrap_or(v.number.unwrap_or(0)),
+                            name: v.name.unwrap_or_else(|| {
+                                format!(
+                                    "S{:02}E{:02}",
+                                    season_number,
+                                    v.episode.unwrap_or(v.number.unwrap_or(0))
+                                )
+                            }),
+                            overview: v.overview.or(v.description),
+                            still_path: v.thumbnail,
+                            air_date: v.released.or(v.first_aired),
+                            runtime: None,
+                            vote_average: v.rating.and_then(|s| s.parse().ok()),
+                        });
+                    }
+                }
+                if !episodes.is_empty() {
+                    return Ok(TvSeasonDetails {
+                        season_number,
+                        name: format!("Season {}", season_number),
+                        episodes,
+                    });
+                }
+            }
+        }
+        return Err(format!(
+            "[IMDB] no api_key and no IMDb id for tv_id={}",
+            tv_id
+        ));
+    }
 
     // Try to get show's imdb_id from database for imdbapi.dev image fallback
     let show_imdb_id_from_db: Option<String> = {
@@ -8719,6 +9116,10 @@ async fn get_tmdb_reviews(
         let config = state.config.lock().map_err(|e| e.to_string())?;
         tmdb::get_tmdb_credential(&config.tmdb_api_key.clone().unwrap_or_default())
     };
+
+    if credential.trim().is_empty() {
+        return Ok(Vec::new());
+    }
 
     let path = if media_type == "tv" {
         format!("/tv/{}/reviews", tmdb_id)
@@ -9782,6 +10183,7 @@ async fn get_tmdb_release_schedule(
     media_type: String,
     season_number: Option<i32>,
     episode_number: Option<i32>,
+    imdb_id: Option<String>,
 ) -> Result<TmdbReleaseSchedule, String> {
     let credential = {
         let config = state.config.lock().map_err(|e| e.to_string())?;
@@ -9791,6 +10193,46 @@ async fn get_tmdb_release_schedule(
     let media_type = media_type.trim().to_string();
     if media_type != "movie" && media_type != "tv" {
         return Err("media_type must be movie or tv".to_string());
+    }
+
+    if credential.trim().is_empty() {
+        return tokio::task::spawn_blocking(move || -> Result<TmdbReleaseSchedule, String> {
+            let imdb_id = imdb_id.clone().or_else(|| {
+                if tmdb_id > 0 {
+                    Some(format!("tt{:07}", tmdb_id))
+                } else {
+                    None
+                }
+            });
+            let kind = if media_type == "tv" {
+                cinemeta_api::CinemetaKind::Series
+            } else {
+                cinemeta_api::CinemetaKind::Movie
+            };
+            if let Some(tt) = imdb_id.as_deref() {
+                if let Ok(meta) = cinemeta_api::get_title(kind, tt) {
+                    let release_date = meta.released.clone().filter(|s| !s.trim().is_empty());
+                    let suggested = suggested_reminder_at_from_release_date(release_date.as_deref());
+                    let title = meta.name.clone();
+                    let mut schedule = TmdbReleaseSchedule {
+                        tmdb_id,
+                        media_type: media_type.clone(),
+                        title,
+                        season_number,
+                        episode_number,
+                        release_date,
+                        suggested_reminder_at: suggested,
+                        source: "imdb".to_string(),
+                        precision: "date".to_string(),
+                        editable: true,
+                    };
+                    return Ok(schedule);
+                }
+            }
+            Err("[IMDB] no api_key and no IMDb id".into())
+        })
+        .await
+        .map_err(|e| e.to_string())?;
     }
 
     tokio::task::spawn_blocking(move || -> Result<TmdbReleaseSchedule, String> {
@@ -10191,34 +10633,41 @@ fn resolve_next_tv_season_reminder_target(
     Ok(None)
 }
 
-// Search TMDB for streaming - returns raw search results
+// Search metadata for streaming - returns raw search results.
+// Routes to TMDB if the user has set an API key, otherwise to the free
+// api.imdbapi.dev service.
 #[tauri::command]
 async fn search_tmdb(
     state: State<'_, AppState>,
     query: String,
 ) -> Result<TmdbSearchResponse, String> {
-    println!("[SEARCH_TMDB] Starting search for: {}", query);
+    println!("[SEARCH_META] Starting search for: {}", query);
 
     let credential = {
         let config = state.config.lock().map_err(|e| {
-            println!("[SEARCH_TMDB] Failed to lock config: {}", e);
+            println!("[SEARCH_META] Failed to lock config: {}", e);
             e.to_string()
         })?;
         let key = tmdb::get_tmdb_credential(&config.tmdb_api_key.clone().unwrap_or_default());
         println!(
-            "[SEARCH_TMDB] Credential length: {} (is_token: {})",
+            "[SEARCH_META] API key length: {} (is_token: {})",
             key.len(),
             is_access_token(&key)
         );
         key
     };
 
-    println!("[SEARCH_TMDB] Using TMDB module search with robust retry logic");
+    let source = match tmdb::pick_source(&credential) {
+        tmdb::MetadataSource::Tmdb => "TMDB (themoviedb.org)",
+        tmdb::MetadataSource::Cinemeta => "Cinemeta (v3-cinemeta.strem.io)",
+        tmdb::MetadataSource::Imdb => "imdbapi.dev (last-resort fallback)",
+    };
+    println!("[SEARCH_META] Source: {}", source);
 
-    // Run blocking HTTP request in a separate thread using tmdb.rs retry handling
     let raw_results =
         tokio::task::spawn_blocking(move || -> Result<Vec<tmdb::TmdbSearchListItem>, String> {
-            tmdb::search_multi_raw(&credential, &query).map_err(|e| e.to_string())
+            tmdb::search_multi_raw_with_fallback(&credential, &query, None)
+                .map_err(|e| e.to_string())
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -10286,54 +10735,104 @@ async fn search_content(
 
     let tmdb_c = tmdb_credential.clone();
     let q = query.clone();
+    let mt = media_type.clone();
 
-    let results = tokio::task::spawn_blocking(move || -> Vec<HybridSearchResult> {
-        let Ok(tmdb_results) = tmdb::search_multi_raw(&tmdb_c, &q) else {
-            return Vec::new();
-        };
+    let results = tokio::task::spawn_blocking(move || -> Result<Vec<HybridSearchResult>, String> {
+        let search_type = mt.as_deref();
+        let tmdb_results =
+            tmdb::search_multi_raw_with_fallback(&tmdb_c, &q, search_type)
+                .map_err(|e| e.to_string())?;
 
-        tmdb_results
+        Ok(tmdb_results
             .into_iter()
-            .filter(|item| {
-                media_type.as_ref().map_or(true, |mt| item.media_type == *mt)
-            })
+            .filter(|item| mt.as_ref().map_or(true, |want| item.media_type == *want))
             .map(|item| HybridSearchResult {
                 title: item.title.unwrap_or_else(|| item.name.unwrap_or_default()),
-                year: item.release_date.as_deref().or(item.first_air_date.as_deref())
-                    .and_then(|d| d.get(..4)).map(|y| y.to_string()),
-                imdb_id: String::new(),
+                year: item
+                    .release_date
+                    .as_deref()
+                    .or(item.first_air_date.as_deref())
+                    .and_then(|d| d.get(..4))
+                    .map(|y| y.to_string()),
+                imdb_id: item.imdb_id.clone().unwrap_or_default(),
                 media_type: item.media_type,
                 plot: item.overview,
-                poster_url: item.poster_path.as_ref()
-                    .map(|p| format!("https://image.tmdb.org/t/p/w500{}", p)),
+                poster_url: item.poster_path.as_ref().map(|p| {
+                    if p.starts_with("http") {
+                        p.clone()
+                    } else {
+                        format!("https://image.tmdb.org/t/p/w500{}", p)
+                    }
+                }),
                 genre: None,
                 director: None,
                 actors: None,
-                imdb_rating: None,
-                tmdb_id: Some(item.id),
-                tmdb_poster_path: item.poster_path,
-                tmdb_backdrop_path: item.backdrop_path,
+                imdb_rating: item.vote_average,
+                tmdb_id: if item.imdb_id.is_some() { None } else { Some(item.id) },
+                tmdb_poster_path: item.poster_path.clone(),
+                tmdb_backdrop_path: item.backdrop_path.clone(),
                 tmdb_vote_average: item.vote_average,
             })
-            .collect()
+            .collect())
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())??;
 
     Ok(HybridSearchResponse { results })
 }
 
 #[tauri::command]
 async fn get_tmdb_trending(state: State<'_, AppState>) -> Result<TmdbTrendingResponse, String> {
-    println!("[TMDB_TRENDING] Fetching trending movie and TV suggestions");
+    println!("[TRENDING] Fetching trending movie and TV suggestions");
 
     let credential = {
         let config = state.config.lock().map_err(|e| {
-            println!("[TMDB_TRENDING] Failed to lock config: {}", e);
+            println!("[TRENDING] Failed to lock config: {}", e);
             e.to_string()
         })?;
         tmdb::get_tmdb_credential(&config.tmdb_api_key.clone().unwrap_or_default())
     };
+
+    if credential.trim().is_empty() {
+        let raw = tokio::task::spawn_blocking(
+            move || -> Result<Vec<tmdb::TmdbTrendingListItem>, String> {
+                let mut out: Vec<tmdb::TmdbTrendingListItem> = Vec::new();
+                for kind in [
+                    cinemeta_api::CinemetaKind::Movie,
+                    cinemeta_api::CinemetaKind::Series,
+                ] {
+                    if let Ok(items) = cinemeta_api::trending(kind, 3) {
+                        for t in items {
+                            out.push(tmdb::TmdbTrendingListItem {
+                                id: t.moviedb_id.unwrap_or_else(|| {
+                                    t.id.trim_start_matches("tt")
+                                        .chars()
+                                        .take_while(|c| c.is_ascii_digit())
+                                        .collect::<String>()
+                                        .parse::<i64>()
+                                        .unwrap_or(0)
+                                }),
+                                title: t.name,
+                                media_type: kind.as_str().to_string(),
+                            });
+                        }
+                    }
+                }
+                Ok(out)
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())??;
+        let results = raw
+            .into_iter()
+            .map(|item| TmdbTrendingItem {
+                id: item.id,
+                title: item.title,
+                media_type: item.media_type,
+            })
+            .collect();
+        return Ok(TmdbTrendingResponse { results });
+    }
 
     let raw_results =
         tokio::task::spawn_blocking(move || -> Result<Vec<tmdb::TmdbTrendingListItem>, String> {
@@ -10815,7 +11314,6 @@ fn create_main_window(app: &AppHandle) -> Result<tauri::Window, tauri::Error> {
         .title(runtime_window_title())
         .inner_size(1200.0, 800.0)
         .resizable(true)
-        .transparent(true)
         .decorations(false)
         .build()?;
 
@@ -11643,7 +12141,7 @@ fn ensure_cloud_show_with_metadata(
             )
         } else {
             let tmdb_result =
-                tmdb::search_metadata(api_key, show_title, "tv", year, image_cache_dir)
+                tmdb::search_metadata_with_fallback(api_key, show_title, "tv", year, image_cache_dir)
                     .ok()
                     .flatten();
 
@@ -12847,7 +13345,7 @@ async fn background_check_cloud_changes(
                         let show_meta = if let Some(cached) = tv_metadata_cache.get(&title_lower) {
                             cached.clone()
                         } else {
-                            let meta = tmdb::search_metadata(
+                            let meta = tmdb::search_metadata_with_fallback(
                                 &api_key,
                                 &title,
                                 "tv",
@@ -12913,7 +13411,7 @@ async fn background_check_cloud_changes(
                             }
                         }
                     } else {
-                        if let Ok(Some(meta)) = tmdb::search_metadata(
+                        if let Ok(Some(meta)) = tmdb::search_metadata_with_fallback(
                             &api_key,
                             &title,
                             "movie",
@@ -15348,7 +15846,7 @@ async fn run_startup_metadata_enrichment(app_handle: AppHandle) {
                 let metadata_result = if let Some(ref tid) = item.tmdb_id {
                     let cleaned = tid.trim();
                     if cleaned.is_empty() {
-                        tmdb::search_metadata(
+                        tmdb::search_metadata_with_fallback(
                             &credential,
                             &item.title,
                             tmdb_media_type,
@@ -15358,7 +15856,7 @@ async fn run_startup_metadata_enrichment(app_handle: AppHandle) {
                         .map_err(|e| e.to_string())?
                         .ok_or_else(|| "No TMDB match found".to_string())
                     } else {
-                        tmdb::fetch_metadata_by_id(
+                        tmdb::fetch_metadata_by_id_with_fallback(
                             &credential,
                             cleaned,
                             tmdb_media_type,
@@ -15367,7 +15865,7 @@ async fn run_startup_metadata_enrichment(app_handle: AppHandle) {
                         .map_err(|e| e.to_string())
                     }
                 } else {
-                    tmdb::search_metadata(
+                    tmdb::search_metadata_with_fallback(
                         &credential,
                         &item.title,
                         tmdb_media_type,
@@ -15634,7 +16132,7 @@ async fn ddl_index_archive(
                 let candidate_owned = candidate.clone();
                 let image_cache_dir = image_cache_dir.clone();
                 match tokio::task::spawn_blocking(move || {
-                    tmdb::search_metadata(
+                    tmdb::search_metadata_with_fallback(
                         &api_key,
                         &candidate_owned,
                         "tv",
@@ -15859,7 +16357,7 @@ async fn ddl_index_archive(
             let movie_title_for_search = movie_title.clone();
             let image_cache_dir = image_cache_dir.clone();
             match tokio::task::spawn_blocking(move || {
-                tmdb::search_metadata(
+                tmdb::search_metadata_with_fallback(
                     &api_key,
                     &movie_title_for_search,
                     "movie",
@@ -18070,6 +18568,7 @@ fn main() {
         oauth_nonce: Arc::new(Mutex::new(None)),
         cache_manager: stream_cache::CacheManager::new(),
         last_validation_report: Mutex::new(None),
+        gdrive_refresh_watchdog: Arc::new(Mutex::new(None)),
     };
 
     // Create system tray menu with continue-watching items
@@ -18347,6 +18846,17 @@ fn main() {
                 }
             });
 
+            // Background refresh watchdog for Google Drive tokens. Keeps access
+            // tokens fresh while the app is idle so users are not logged out
+            // after long periods and so cloud playback does not expire the
+            // token mid-stream.
+            let state_handle = app.state::<AppState>();
+            let watchdog_handle =
+                state_handle.gdrive_client.start_background_refresh_watchdog();
+            if let Ok(mut guard) = state_handle.gdrive_refresh_watchdog.lock() {
+                *guard = Some(watchdog_handle);
+            }
+
             Ok(())
         })
         .on_page_load(|window, payload| {
@@ -18527,6 +19037,7 @@ fn main() {
             // Google Drive commands
             gdrive_is_connected,
             gdrive_get_access_token,
+            gdrive_get_auth_status,
             gdrive_get_account_info,
             gdrive_start_auth,
             gdrive_complete_auth,
@@ -18637,25 +19148,36 @@ fn main() {
             cf_relay::cf_deploy_relay,
             cf_relay::cf_delete_relay,
             cf_relay::cf_relay_status,
+            // Stremio addon commands
+            stremio::stremio_add_addon,
+            stremio::stremio_remove_addon,
+            stremio::stremio_list_addons,
+            stremio::stremio_fetch_catalog,
+            stremio::stremio_fetch_meta,
+            stremio::stremio_fetch_streams,
+            stremio::stremio_resolve_stream,
+            // Debrid service commands
+            stremio::debrid_add_service,
+            stremio::debrid_remove_service,
+            stremio::debrid_list_services,
+            stremio::debrid_set_default,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app_handle, event| {
-            match event {
-                tauri::RunEvent::ExitRequested { api, .. } => {
-                    api.prevent_exit();
-                    println!("[TRAY] Exit prevented. App running in background. Click tray to reopen.");
-                }
-                tauri::RunEvent::Exit => {
-                    // Kill the running addon process on app exit
-                    if let Ok(mut proc) = RUNNING_ADDON_PROCESS.lock() {
-                        if let Some(mut child) = proc.take() {
-                            println!("[EXIT] Killing addon server process...");
-                            let _ = child.kill();
-                        }
+        .run(|app_handle, event| match event {
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                api.prevent_exit();
+                println!("[TRAY] Exit prevented. App running in background. Click tray to reopen.");
+            }
+            tauri::RunEvent::Exit => {
+                if let Ok(mut proc) = RUNNING_ADDON_PROCESS.lock() {
+                    if let Some(mut child) = proc.take() {
+                        println!("[EXIT] Killing addon server process...");
+                        let _ = child.kill();
                     }
                 }
-                _ => {}
+                abort_gdrive_refresh_watchdog(&app_handle);
             }
+            _ => {}
         });
 }

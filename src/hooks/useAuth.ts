@@ -17,8 +17,10 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutVal
   ])
 }
 
+export type AuthState = 'unauthenticated' | 'valid' | 'soft_lost'
+
 export function useAuth() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [state, setState] = useState<AuthState>('unauthenticated')
   const [isAuthLoading, setIsAuthLoading] = useState(true)
   const [isLoggingIn, setIsLoggingIn] = useState(false)
   const [showIndexingPrompt, setShowIndexingPrompt] = useState(false)
@@ -27,6 +29,10 @@ export function useAuth() {
   const initialScanTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const authFailsafeRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const { toast } = useToast()
+
+  // Backwards-compatible boolean. Derived.
+  const isAuthenticated = state !== 'unauthenticated'
+  const needsReauth = state === 'soft_lost'
 
   const autoDetectMpvIfUnconfigured = async () => {
     try {
@@ -83,7 +89,7 @@ export function useAuth() {
 
       try {
         // First check if GDrive is connected (fast local check)
-        const { isGDriveConnected } = await import('@/services/gdrive')
+        const { isGDriveConnected, getGDriveAuthStatus } = await import('@/services/gdrive')
         connected = await withTimeout(
           isGDriveConnected(),
           AUTH_CHECK_TIMEOUT_MS,
@@ -91,9 +97,19 @@ export function useAuth() {
         )
 
         if (connected) {
-          // GDrive is connected, user is authenticated
+          // Distinguish "valid" from "soft_lost" before flipping state.
+          const status = await withTimeout(
+            getGDriveAuthStatus(),
+            AUTH_CHECK_TIMEOUT_MS,
+            null
+          )
           if (isMountedRef.current) {
-            setIsAuthenticated(true)
+            if (status && status.has_refresh_token === false) {
+              setState('soft_lost')
+            } else {
+              // status === null or has_refresh_token === true: treat as valid
+              setState('valid')
+            }
           }
         }
       } catch (error) {
@@ -129,7 +145,7 @@ export function useAuth() {
       setIsLoggingIn(true)
     }
     try {
-      const { startGDriveAuth, completeGDriveAuth, isGDriveConnected } = await import('@/services/gdrive')
+      const { startGDriveAuth, completeGDriveAuth, isGDriveConnected, getGDriveAuthStatus } = await import('@/services/gdrive')
 
       // Start OAuth flow - opens browser
       await startGDriveAuth()
@@ -147,11 +163,23 @@ export function useAuth() {
 
         if (connected) {
           if (isMountedRef.current) {
-            setIsAuthenticated(true)
             toast({
               title: "Welcome!",
               description: `Signed in as ${accountInfo.email}`
             })
+          }
+
+          const status = await withTimeout(
+            getGDriveAuthStatus(),
+            AUTH_CHECK_TIMEOUT_MS,
+            null
+          )
+          if (isMountedRef.current) {
+            if (status?.has_refresh_token === false) {
+              setState('soft_lost')
+            } else {
+              setState('valid')
+            }
           }
 
           void autoDetectMpvIfUnconfigured()
@@ -208,7 +236,7 @@ export function useAuth() {
       const { disconnectGDrive } = await import('@/services/gdrive')
       await disconnectGDrive()
       if (isMountedRef.current) {
-        setIsAuthenticated(false)
+        setState('unauthenticated')
         toast({
           title: "Signed Out",
           description: "You have been signed out successfully"
@@ -258,12 +286,58 @@ export function useAuth() {
     }
   }
 
+  // Reauth flow — used when state has drifted to 'soft_lost'.
+  // Performs the OAuth dance again and re-reads the auth status snapshot to
+  // decide whether to flip back to 'valid' or stay in 'soft_lost'.
+  const reauth = async (): Promise<boolean> => {
+    if (isMountedRef.current) {
+      setIsLoggingIn(true)
+    }
+    try {
+      const { startGDriveAuth, completeGDriveAuth, getGDriveAuthStatus } = await import('@/services/gdrive')
+
+      await startGDriveAuth()
+      const accountInfo = await completeGDriveAuth()
+
+      if (!accountInfo) {
+        return false
+      }
+
+      const status = await withTimeout(
+        getGDriveAuthStatus(),
+        AUTH_CHECK_TIMEOUT_MS,
+        null
+      )
+
+      let nextState: AuthState
+      if (status?.has_refresh_token === false) {
+        nextState = 'soft_lost'
+      } else {
+        nextState = 'valid'
+      }
+      if (isMountedRef.current) {
+        setState(nextState)
+      }
+      return nextState === 'valid'
+    } catch (error) {
+      console.error('[Auth] reauth failed:', error)
+      return false
+    } finally {
+      if (isMountedRef.current) {
+        setIsLoggingIn(false)
+      }
+    }
+  }
+
   return {
+    state,
     isAuthenticated,
+    needsReauth,
     isAuthLoading,
     isLoggingIn,
     login,
     logout,
+    reauth,
     showIndexingPrompt,
     isIndexing,
     confirmIndexing,

@@ -21,7 +21,9 @@ SlasshyVault is a **local-first** desktop app. All user data stays on your machi
 | Browse library | None (local SQLite) | — |
 | Play local file | None | — |
 | Play cloud file | `GET api.googleapis.com` | Drive file ID |
-| Search metadata | `GET api.themoviedb.org` | Search query or media ID |
+| Search metadata (with TMDB key) | `GET api.themoviedb.org` | Search query or media ID |
+| Search metadata (no TMDB key, primary) | `GET v3-cinemeta.strem.io` | Search query |
+| Search metadata (no TMDB key, fallback) | `GET api.imdbapi.dev` | Search query |
 | Get IMDb rating | `GET api.imdbapi.dev` | IMDb ID |
 | Watch Together | WebSocket → your Worker | Play/pause/seek state |
 | Sign in | Redirect → OAuth backend → Google | OAuth session (5 min TTL) |

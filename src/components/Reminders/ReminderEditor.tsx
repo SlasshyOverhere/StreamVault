@@ -117,10 +117,11 @@ export function ReminderEditor({
           setSuggesting(true)
           try {
             const sched = await getTmdbReleaseSchedule(
-              Number(tmdbId), 
-              mediaType as 'movie' | 'tv', 
-              seasonNumber, 
-              episodeNumber
+              Number(tmdbId),
+              mediaType as 'movie' | 'tv',
+              seasonNumber,
+              episodeNumber,
+              null,
             )
             setSchedule(sched)
             if (sched.title) {

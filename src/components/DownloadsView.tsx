@@ -1,29 +1,27 @@
 import { DownloadJob } from "@/services/api";
 import { formatFileSize } from "@/utils/format";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import {
   AlertTriangle,
   CheckCircle2,
-  Clock3,
   Download,
   FolderOpen,
   Loader2,
   PauseCircle,
-  XCircle,
   Trash2,
   CheckSquare,
-  History,
-  ChevronRight,
   ArrowDownToLine,
   HardDrive,
   Cloud,
   Globe,
+  Search,
+  ChevronRight,
+  X,
+  MoreHorizontal,
 } from "lucide-react";
 import { LazyMotion, m, AnimatePresence, domAnimation } from "framer-motion";
-import { useState, useMemo, memo } from "react";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { useState, useMemo, memo, useDeferredValue } from "react";
 
 interface DownloadsViewProps {
   jobs: DownloadJob[];
@@ -41,6 +39,7 @@ const formatSpeed = (bytesPerSecond?: number | null) => {
 const formatTimeRemaining = (job: DownloadJob): string | null => {
   if (job.status !== "downloading" || !job.speedBytesPerSecond || job.speedBytesPerSecond <= 0) return null;
   const remaining = job.totalBytes - job.downloadedBytes;
+  if (remaining <= 0) return null;
   const seconds = remaining / job.speedBytesPerSecond;
   if (seconds < 60) return `${Math.ceil(seconds)}s`;
   if (seconds < 3600) return `${Math.ceil(seconds / 60)}m`;
@@ -49,500 +48,581 @@ const formatTimeRemaining = (job: DownloadJob): string | null => {
   return `${h}h ${m}m`;
 };
 
-type DownloadJobStatus = 'queued' | 'preparing' | 'downloading' | 'completed' | 'failed' | 'cancelled';
+const formatRelativeDate = (iso: string) => {
+  const date = new Date(iso);
+  const now = Date.now();
+  const diff = (now - date.getTime()) / 1000;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+};
 
-const isActiveStatus = (status: DownloadJobStatus): status is 'queued' | 'preparing' | 'downloading' =>
+type DownloadJobStatus = "queued" | "preparing" | "downloading" | "completed" | "failed" | "cancelled";
+
+const isActiveStatus = (status: DownloadJobStatus): status is "queued" | "preparing" | "downloading" =>
   status === "queued" || status === "preparing" || status === "downloading";
+
+const isArchivedStatus = (status: DownloadJobStatus) =>
+  status === "completed" || status === "failed" || status === "cancelled";
 
 const statusMeta = (status: DownloadJobStatus) => {
   switch (status) {
     case "completed":
-      return {
-        icon: CheckCircle2,
-        label: "Completed",
-        className: "bg-emerald-500/15 text-emerald-400 border-emerald-500/25",
-      };
+      return { label: "Completed", tone: "ok" as const };
     case "failed":
-      return {
-        icon: AlertTriangle,
-        label: "Failed",
-        className: "bg-red-500/10 text-red-400 border-red-500/20",
-      };
+      return { label: "Failed", tone: "danger" as const };
     case "cancelled":
-      return {
-        icon: XCircle,
-        label: "Cancelled",
-        className: "bg-zinc-500/10 text-zinc-400 border-zinc-500/20",
-      };
+      return { label: "Cancelled", tone: "muted" as const };
     case "preparing":
-      return {
-        icon: Clock3,
-        label: "Preparing",
-        className: "bg-amber-500/10 text-amber-400 border-amber-500/20",
-      };
+      return { label: "Preparing", tone: "warn" as const };
     case "queued":
-      return {
-        icon: PauseCircle,
-        label: "Queued",
-        className: "bg-blue-500/10 text-blue-400 border-blue-500/20",
-      };
+      return { label: "Queued", tone: "muted" as const };
     default:
-      return {
-        icon: Download,
-        label: "Downloading",
-        className: "bg-white text-black border-white",
-      };
+      return { label: "Downloading", tone: "live" as const };
   }
+};
+
+const toneClass = (tone: ReturnType<typeof statusMeta>["tone"]) => {
+  switch (tone) {
+    case "ok":
+      return "text-emerald-300";
+    case "danger":
+      return "text-red-300";
+    case "warn":
+      return "text-amber-300";
+    case "live":
+      return "text-white";
+    case "muted":
+    default:
+      return "text-white/40";
+  }
+};
+
+const sourceIconKey = (kind: string): "gdrive" | "direct" | "other" => {
+  if (kind === "gdrive") return "gdrive";
+  if (kind === "direct") return "direct";
+  return "other";
+};
+
+const SourceIconByKey = ({ kind }: { kind: "gdrive" | "direct" | "other" }) => {
+  if (kind === "gdrive") return <Cloud className="size-4" />;
+  if (kind === "direct") return <Globe className="size-4" />;
+  return <HardDrive className="size-4" />;
 };
 
 type TabFilter = "all" | "active" | "completed" | "failed";
 
-export function DownloadsView({ 
-  jobs, 
-  onCancel, 
-  onOpen, 
-  onDeleteJob, 
-  onClearHistory 
+const TABS: Array<{ id: TabFilter; label: string }> = [
+  { id: "all", label: "All" },
+  { id: "active", label: "Active" },
+  { id: "completed", label: "Completed" },
+  { id: "failed", label: "Failed" },
+];
+
+const VISIBLE_LIMIT = 12;
+
+export function DownloadsView({
+  jobs,
+  onCancel,
+  onOpen,
+  onDeleteJob,
+  onClearHistory,
 }: DownloadsViewProps) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selectionMode, setSelectionMode] = useState(false);
-  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<TabFilter>("all");
+  const [query, setQuery] = useState("");
+  const [showFullArchive, setShowFullArchive] = useState(false);
+  const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
 
-  const activeJobs = useMemo(() => jobs.filter((job) => isActiveStatus(job.status)), [jobs]);
-  const archivedJobs = useMemo(() => [...jobs]
-    .filter((job) => !isActiveStatus(job.status))
-    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()), [jobs]);
+  const deferredQuery = useDeferredValue(query);
+
+  const activeJobs = useMemo(
+    () => jobs.filter((job) => isActiveStatus(job.status)),
+    [jobs],
+  );
+  const archivedJobs = useMemo(
+    () =>
+      [...jobs]
+        .filter((job) => isArchivedStatus(job.status))
+        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()),
+    [jobs],
+  );
+  const failedArchivedJobs = useMemo(
+    () => archivedJobs.filter((j) => j.status === "failed" || j.status === "cancelled"),
+    [archivedJobs],
+  );
+
+  const counts = useMemo(
+    () => ({
+      all: jobs.length,
+      active: activeJobs.length,
+      completed: archivedJobs.filter((j) => j.status === "completed").length,
+      failed: failedArchivedJobs.length,
+    }),
+    [jobs, activeJobs, archivedJobs, failedArchivedJobs],
+  );
+
+  const matchesQuery = (job: DownloadJob) => {
+    if (!deferredQuery.trim()) return true;
+    const q = deferredQuery.toLowerCase();
+    return (
+      job.title.toLowerCase().includes(q) ||
+      job.fileName.toLowerCase().includes(q) ||
+      job.sourceKind.toLowerCase().includes(q)
+    );
+  };
+
+  const filteredActive = useMemo(
+    () =>
+      (activeTab === "all" || activeTab === "active" ? activeJobs : []).filter(matchesQuery),
+    // matchesQuery is recreated each render but only depends on deferredQuery; including it directly
+    // trips React Compiler. The deferredQuery dep captures the same value.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeJobs, activeTab, deferredQuery],
+  );
+  const filteredArchived = useMemo(() => {
+    if (activeTab === "active") return [];
+    if (activeTab === "completed")
+      return archivedJobs.filter((j) => j.status === "completed").filter(matchesQuery);
+    if (activeTab === "failed") return failedArchivedJobs.filter(matchesQuery);
+    return archivedJobs.filter(matchesQuery);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [archivedJobs, failedArchivedJobs, activeTab, deferredQuery]);
+
+  const visibleActive = filteredActive;
+  const visibleArchived = showFullArchive
+    ? filteredArchived
+    : filteredArchived.slice(0, VISIBLE_LIMIT);
+  const archivedOverflow = Math.max(0, filteredArchived.length - VISIBLE_LIMIT);
 
   const toggleSelect = (id: string) => {
-    const next = new Set(selectedIds);
-    if (next.has(id)) {
-      next.delete(id);
-    } else {
-      next.add(id);
-    }
-    setSelectedIds(next);
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const exitSelection = () => {
+    setSelectionMode(false);
+    setSelectedIds(new Set());
   };
 
   const handleDeleteSelected = async () => {
     if (selectedIds.size === 0) return;
-    if (window.confirm(`Delete ${selectedIds.size} selected items?`)) {
-      const ids = Array.from(selectedIds);
-      const results = await Promise.allSettled(ids.map(id => onDeleteJob(id)));
-      for (const result of results) {
-        if (result.status === "rejected") {
-          console.error("Failed to delete job:", result.reason);
-        }
-      }
-      setSelectedIds(new Set());
-      setSelectionMode(false);
+    if (!window.confirm(`Delete ${selectedIds.size} selected item${selectedIds.size !== 1 ? "s" : ""}?`)) return;
+    const ids = Array.from(selectedIds);
+    const results = await Promise.allSettled(ids.map((id) => onDeleteJob(id)));
+    for (const result of results) {
+      if (result.status === "rejected") console.error("Failed to delete job:", result.reason);
     }
+    exitSelection();
   };
 
   const handleClearHistory = async () => {
-    if (window.confirm("Clear all finished and failed downloads?")) {
-      await onClearHistory();
-      setIsHistoryOpen(false);
-    }
+    if (archivedJobs.length === 0) return;
+    if (!window.confirm(`Clear ${archivedJobs.length} finished item${archivedJobs.length !== 1 ? "s" : ""}?`)) return;
+    await onClearHistory();
   };
 
-  const stats = useMemo(() => ({
-    active: activeJobs.length,
-    completed: jobs.filter((j) => j.status === "completed").length,
-    failed: jobs.filter((j) => j.status === "failed").length,
-    total: jobs.length,
-  }), [jobs, activeJobs]);
-
-  const TABS: Array<{ id: TabFilter; label: string; count: number }> = [
-    { id: "all", label: "All", count: jobs.length },
-    { id: "active", label: "Active", count: activeJobs.length },
-    { id: "completed", label: "Completed", count: stats.completed },
-    { id: "failed", label: "Failed", count: stats.failed },
-  ];
+  const isFilterEmpty =
+    filteredActive.length === 0 && filteredArchived.length === 0 && jobs.length > 0;
 
   return (
     <LazyMotion features={domAnimation}>
-      <div className="h-full overflow-hidden relative">
-      <div className="absolute inset-0 bg-gradient-mesh opacity-20 pointer-events-none" />
-      <div className="absolute inset-0 bg-sheen opacity-10 pointer-events-none" />
-      <div className="absolute inset-0 noise-overlay opacity-[0.02] pointer-events-none" />
-
-      <div className="relative h-full overflow-y-auto pt-24 pb-4 scrollbar-none">
-        <m.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, ease: [0.19, 1, 0.22, 1] }}
-          className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 sm:px-6 lg:px-10 pb-12"
-        >
-          {/* Header */}
-          <section className="flex flex-shrink-0 flex-col gap-6 px-2 sm:flex-row sm:items-center sm:justify-between">
-            <m.div
-              initial={{ x: -20, opacity: 0 }}
-              animate={{ x: 0, opacity: 1 }}
-              transition={{ duration: 0.4, ease: [0.19, 1, 0.22, 1] }}
-              className="flex items-center gap-4"
-            >
-              <div className="relative group">
-                <div className="absolute -inset-2 bg-white/10 blur-xl rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
-                <div className="relative size-12 rounded-[1.25rem] bg-white/5 border border-white/10 flex items-center justify-center shadow-elevation-1">
-                  <ArrowDownToLine className="size-6 text-white/70" />
-                </div>
-              </div>
-              <div className="space-y-0.5">
-                <h1 className="text-4xl font-black tracking-tighter leading-none text-white">
+      <div className="relative h-full overflow-y-auto">
+        <div className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 pb-16 pt-8 sm:px-6 sm:pt-10 lg:px-10">
+          {/* Page header */}
+          <header className="flex flex-col gap-6">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+              <div className="space-y-1.5">
+                <h1 className="text-[2rem] font-bold leading-none tracking-tight text-white sm:text-[2.25rem]">
                   Downloads
                 </h1>
-                <div className="flex items-center gap-2">
-                  <div className={cn(
-                    "size-1 rounded-full transition-all duration-500",
-                    activeJobs.length > 0 ? "bg-emerald-500/50 animate-pulse shadow-[0_0_6px_rgba(16,185,129,0.5)]" : "bg-white/10"
-                  )} />
-                  <p className="text-white/20 text-[9px] font-black uppercase tracking-[0.3em]">
-                    {activeJobs.length > 0 ? `${activeJobs.length} active transfer${activeJobs.length !== 1 ? 's' : ''}` : "Parallel Engine v2"}
-                  </p>
-                </div>
+                <p className="text-sm text-white/45">
+                  {counts.active > 0
+                    ? `${counts.active} active · ${counts.completed} completed · ${counts.failed} failed`
+                    : "No active transfers. Parallel engine idle."}
+                </p>
               </div>
-            </m.div>
 
-            <m.div
-              initial={{ x: 20, opacity: 0 }}
-              animate={{ x: 0, opacity: 1 }}
-              transition={{ duration: 0.4, ease: [0.19, 1, 0.22, 1], delay: 0.1 }}
-              className="flex flex-wrap items-center gap-3"
-            >
-              <MetricChip label="Active" value={stats.active} active={stats.active > 0} />
-              <MetricChip label="Completed" value={stats.completed} />
-              <MetricChip label="Failed" value={stats.failed} alert={stats.failed > 0} />
-            </m.div>
-          </section>
+              <div className="flex items-center gap-2">
+                <label className="relative flex items-center">
+                  <span className="sr-only">Search downloads</span>
+                  <Search className="pointer-events-none absolute left-3 size-4 text-white/30" />
+                  <input
+                    type="search"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Search title or file"
+                    className="h-10 w-56 rounded-xl border border-white/10 bg-white/[0.04] pl-9 pr-3 text-sm text-white placeholder:text-white/30 transition-colors hover:border-white/20 focus:border-white/30 focus:bg-white/[0.06] focus:outline-none"
+                  />
+                </label>
+              </div>
+            </div>
 
-          {/* Toolbar */}
-          <m.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.4, ease: [0.19, 1, 0.22, 1], delay: 0.15 }}
-            className="flex flex-shrink-0 items-center justify-between border-b border-white/5 pb-4 px-2"
-          >
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setSelectionMode(!selectionMode);
-                  setSelectedIds(new Set());
-                }}
-                className={cn(
-                  "h-9 rounded-xl border-white/10 px-4 text-[10px] font-black uppercase tracking-widest transition-all",
-                  selectionMode ? "bg-white text-black hover:bg-white/90" : "bg-white/5 text-white/60 hover:bg-white/10"
-                )}
+            {/* Filter bar — single affordance replacing chips + tab pills */}
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <nav
+                role="tablist"
+                aria-label="Filter downloads"
+                className="inline-flex w-fit items-center gap-1 rounded-2xl border border-white/10 bg-white/[0.03] p-1"
               >
-                {selectionMode ? "Cancel" : "Manage"}
-              </Button>
-              
-              <AnimatePresence>
-                {selectionMode && selectedIds.size > 0 && (
-                  <m.div
-                    initial={{ opacity: 0, x: -10 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: -10 }}
-                  >
+                {TABS.map((tab) => {
+                  const active = activeTab === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={active}
+                      onClick={() => setActiveTab(tab.id)}
+                      className={cn(
+                        "flex items-center gap-2 rounded-xl px-3.5 py-1.5 text-sm font-medium transition-colors",
+                        active
+                          ? "bg-white text-black"
+                          : "text-white/55 hover:bg-white/[0.05] hover:text-white",
+                      )}
+                    >
+                      <span>{tab.label}</span>
+                      <span
+                        className={cn(
+                          "tabular-nums rounded-md px-1.5 py-0.5 text-[11px] font-semibold leading-none",
+                          active ? "bg-black/10 text-black/70" : "bg-white/[0.06] text-white/45",
+                        )}
+                      >
+                        {counts[tab.id]}
+                      </span>
+                    </button>
+                  );
+                })}
+              </nav>
+
+              <div className="flex items-center gap-2">
+                {selectionMode ? (
+                  <>
+                    <span className="text-sm text-white/55">
+                      {selectedIds.size} selected
+                    </span>
                     <Button
-                      variant="outline"
+                      variant="ghost"
+                      size="sm"
+                      onClick={exitSelection}
+                      className="h-9 rounded-xl text-white/65 hover:bg-white/[0.06] hover:text-white"
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      variant="ghost"
                       size="sm"
                       onClick={handleDeleteSelected}
-                      className="h-9 rounded-xl border-red-500/20 bg-red-500/10 px-4 text-[10px] font-black uppercase tracking-widest text-red-400 hover:bg-red-500/20 hover:text-red-300"
+                      disabled={selectedIds.size === 0}
+                      className="h-9 rounded-xl text-red-300 hover:bg-red-500/10 hover:text-red-200 disabled:opacity-40"
                     >
                       <Trash2 className="mr-2 size-3.5" />
-                      Delete ({selectedIds.size})
+                      Delete
                     </Button>
-                  </m.div>
+                  </>
+                ) : (
+                  <>
+                    {jobs.length > 0 && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setSelectionMode(true)}
+                        className="h-9 rounded-xl text-white/65 hover:bg-white/[0.06] hover:text-white"
+                      >
+                        Select
+                      </Button>
+                    )}
+                    {archivedJobs.length > 0 && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleClearHistory}
+                        className="h-9 rounded-xl text-white/45 hover:bg-white/[0.06] hover:text-white"
+                      >
+                        Clear history
+                      </Button>
+                    )}
+                  </>
                 )}
-              </AnimatePresence>
+              </div>
             </div>
+          </header>
 
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleClearHistory}
-              disabled={archivedJobs.length === 0}
-              className="h-9 rounded-xl px-4 text-[10px] font-black uppercase tracking-widest text-zinc-500 hover:bg-white/5 hover:text-white disabled:opacity-30"
-            >
-              Clear History
-            </Button>
-          </m.div>
+          {/* Whole-tab empty state */}
+          {jobs.length === 0 ? (
+            <EmptyState />
+          ) : (
+            <div className="space-y-10">
+              {/* Active section */}
+              {(activeTab === "all" || activeTab === "active") && (
+                <Section
+                  title="Active"
+                  description="Transfers in progress or waiting in the queue."
+                  count={filteredActive.length}
+                  total={activeJobs.length}
+                >
+                  {filteredActive.length === 0 ? (
+                    <NoMatches label="No active downloads match this filter." />
+                  ) : (
+                    <div className="space-y-2">
+                      <AnimatePresence initial={false}>
+                        {visibleActive.map((job) => (
+                          <m.div
+                            key={job.id}
+                            layout
+                            initial={{ opacity: 0, y: 8 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: -8 }}
+                            transition={{ duration: 0.2, ease: [0.19, 1, 0.22, 1] }}
+                          >
+                            <DownloadRow
+                              job={job}
+                              onCancel={onCancel}
+                              onOpen={onOpen}
+                              onDelete={onDeleteJob}
+                              isSelectionMode={selectionMode}
+                              isSelected={selectedIds.has(job.id)}
+                              onToggleSelect={() => toggleSelect(job.id)}
+                              menuOpen={activeMenuId === job.id}
+                              onMenuToggle={() =>
+                                setActiveMenuId((prev) => (prev === job.id ? null : job.id))
+                              }
+                              onMenuClose={() => setActiveMenuId(null)}
+                            />
+                          </m.div>
+                        ))}
+                      </AnimatePresence>
+                    </div>
+                  )}
+                </Section>
+              )}
 
-          {/* Tab Bar */}
-          <m.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.4, ease: [0.19, 1, 0.22, 1], delay: 0.2 }}
-            className="flex w-fit items-center gap-1 rounded-2xl p-1 bg-white/[0.03] border border-white/[0.05] backdrop-blur-md mx-2"
-          >
-            {TABS.map((tab) => (
-              <button
-                type="button"
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={cn(
-                  "relative px-5 py-2 rounded-xl text-[9px] font-black uppercase tracking-[0.2em] transition-all duration-500",
-                  activeTab === tab.id
-                    ? "bg-white text-black shadow-glow-sm"
-                    : "text-white/30 hover:text-white/60 hover:bg-white/5"
-                )}
-              >
-                {tab.label}
-                {tab.count > 0 && (
-                  <span className={cn(
-                    "ml-2 tabular-nums",
-                    activeTab === tab.id ? "text-black/50" : "text-white/20"
-                  )}>
-                    {tab.count}
-                  </span>
-                )}
-              </button>
-            ))}
-          </m.div>
+              {/* Archive section */}
+              {(activeTab === "all" ||
+                activeTab === "completed" ||
+                activeTab === "failed") && (
+                <Section
+                  title="Archive"
+                  description="Finished, failed, and cancelled transfers. Newest first."
+                  count={filteredArchived.length}
+                  total={archivedJobs.length}
+                >
+                  {filteredArchived.length === 0 ? (
+                    <NoMatches label="Nothing in the archive matches this filter." />
+                  ) : (
+                    <div className="space-y-2">
+                      <AnimatePresence initial={false}>
+                        {visibleArchived.map((job) => (
+                          <m.div
+                            key={job.id}
+                            layout
+                            initial={{ opacity: 0, y: 8 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: -8 }}
+                            transition={{ duration: 0.2, ease: [0.19, 1, 0.22, 1] }}
+                          >
+                            <DownloadRow
+                              job={job}
+                              onCancel={onCancel}
+                              onOpen={onOpen}
+                              onDelete={onDeleteJob}
+                              isSelectionMode={selectionMode}
+                              isSelected={selectedIds.has(job.id)}
+                              onToggleSelect={() => toggleSelect(job.id)}
+                              menuOpen={activeMenuId === job.id}
+                              onMenuToggle={() =>
+                                setActiveMenuId((prev) => (prev === job.id ? null : job.id))
+                              }
+                              onMenuClose={() => setActiveMenuId(null)}
+                            />
+                          </m.div>
+                        ))}
+                      </AnimatePresence>
 
-          {/* Active Downloads Section */}
-          {(activeTab === "all" || activeTab === "active") && (
-          <section className="w-full space-y-4">
-            <SectionHeader title="Acquisition Queue" subtitle="Active transfers and pending items" />
-            {activeJobs.length === 0 ? (
-              <EmptyDownloadsState />
-            ) : (
-              <AnimatePresence mode="popLayout">
-                <div className="grid gap-3 min-w-0">
-                  {activeJobs.map((job, idx) => (
-                    <m.div
-                      key={job.id}
-                      layout
-                      initial={{ opacity: 0, y: 20 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ duration: 0.4, ease: [0.19, 1, 0.22, 1], delay: Math.min(idx, 8) * 0.04 }}
-                    >
-                      <DownloadRow 
-                        job={job} 
-                        onCancel={onCancel} 
-                        onOpen={onOpen}
-                        onDelete={onDeleteJob}
-                        isSelectionMode={selectionMode}
-                        isSelected={selectedIds.has(job.id)}
-                        onToggleSelect={() => toggleSelect(job.id)}
-                        compact
-                      />
-                    </m.div>
-                  ))}
-                </div>
-              </AnimatePresence>
-            )}
-          </section>
+                      {archivedOverflow > 0 && !showFullArchive && (
+                        <button
+                          type="button"
+                          onClick={() => setShowFullArchive(true)}
+                          className="group flex w-full items-center justify-between rounded-2xl border border-white/5 bg-transparent px-4 py-3 text-left transition-colors hover:border-white/15 hover:bg-white/[0.03]"
+                        >
+                          <span className="text-sm text-white/55 group-hover:text-white">
+                            Show {archivedOverflow} more archived item{archivedOverflow !== 1 ? "s" : ""}
+                          </span>
+                          <ChevronRight className="size-4 text-white/30 group-hover:translate-x-0.5 group-hover:text-white" />
+                        </button>
+                      )}
+                      {showFullArchive && archivedOverflow > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setShowFullArchive(false)}
+                          className="flex w-full items-center justify-center rounded-2xl px-4 py-3 text-sm text-white/45 transition-colors hover:bg-white/[0.03] hover:text-white"
+                        >
+                          Show less
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </Section>
+              )}
+
+              {isFilterEmpty && (
+                <NoMatches label="No downloads match this filter." />
+              )}
+            </div>
           )}
-
-          {/* Completed / Archived Section */}
-          {(activeTab === "all" || activeTab === "completed" || activeTab === "failed") && (
-            <ArchivedSection
-              archivedJobs={archivedJobs}
-              activeTab={activeTab}
-              selectionMode={selectionMode}
-              selectedIds={selectedIds}
-              onToggleSelect={toggleSelect}
-              onCancel={onCancel}
-              onOpen={onOpen}
-              onDelete={onDeleteJob}
-              onShowHistory={() => setIsHistoryOpen(true)}
-            />
-          )}
-        </m.div>
+        </div>
       </div>
-
-      {/* History Dialog */}
-      <Dialog open={isHistoryOpen} onOpenChange={setIsHistoryOpen}>
-        <DialogContent className="max-w-4xl max-h-[85vh] bg-[#0D0D0D] border-white/10 p-0 overflow-hidden flex flex-col rounded-[2.5rem]">
-          <DialogHeader className="p-8 pb-4 flex-shrink-0 border-b border-white/5">
-            <div className="flex items-center justify-between">
-              <div className="space-y-1">
-                <DialogTitle className="text-2xl font-black tracking-tighter text-white">Transfer Log</DialogTitle>
-                <p className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-500">Full acquisition history</p>
-              </div>
-              <Button 
-                variant="ghost" 
-                size="sm" 
-                onClick={handleClearHistory}
-                className="h-9 rounded-xl px-4 text-[10px] font-black uppercase tracking-widest text-rose-500 hover:bg-rose-500/10"
-              >
-                Clear All
-              </Button>
-            </div>
-          </DialogHeader>
-          <div className="flex-1 overflow-hidden p-4">
-            <ScrollArea className="h-full pr-4">
-              <div className="grid gap-4 pb-8">
-                {archivedJobs.map((job, idx) => (
-                  <m.div
-                    key={job.id}
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.3, delay: Math.min(idx, 10) * 0.03 }}
-                  >
-                    <DownloadRow 
-                      job={job} 
-                      onCancel={onCancel} 
-                      onOpen={onOpen}
-                      onDelete={onDeleteJob}
-                      isSelectionMode={selectionMode}
-                      isSelected={selectedIds.has(job.id)}
-                      onToggleSelect={() => toggleSelect(job.id)}
-                      compact
-                    />
-                  </m.div>
-                ))}
-              </div>
-            </ScrollArea>
-          </div>
-        </DialogContent>
-      </Dialog>
-    </div>
     </LazyMotion>
   );
 }
 
-function MetricChip({
-  label,
-  value,
-  active,
-  alert,
+function Section({
+  title,
+  description,
+  count,
+  total,
+  children,
 }: {
-  label: string;
-  value: number;
-  active?: boolean;
-  alert?: boolean;
+  title: string;
+  description: string;
+  count: number;
+  total: number;
+  children: React.ReactNode;
 }) {
   return (
-    <div className={cn(
-      "flex items-center gap-3 rounded-2xl border px-4 py-2 backdrop-blur-md transition-all",
-      active
-        ? "border-white/15 bg-white/[0.05] hover:bg-white/[0.07]"
-        : alert
-          ? "border-red-500/15 bg-red-500/[0.04] hover:bg-red-500/[0.06]"
-          : "border-white/5 bg-white/[0.03] hover:border-white/15 hover:bg-white/[0.05]"
-    )}>
-      {active && <span className="size-1.5 rounded-full bg-emerald-500/70 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.4)]" />}
-      {alert && <span className="size-1.5 rounded-full bg-red-500/70 animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.4)]" />}
-      <span className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-500">{label}</span>
-      <span className={cn(
-        "text-sm font-black",
-        active ? "text-emerald-400" : alert ? "text-red-400" : "text-white"
-      )}>{value}</span>
-    </div>
-  );
-}
-
-function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }) {
-  return (
-    <div className="flex items-end justify-between px-2">
-      <div className="flex items-center gap-3">
-        <h2 className="text-xl font-bold tracking-tight text-white">{title}</h2>
-        {subtitle && (
-          <span className="hidden sm:block text-[9px] font-black uppercase tracking-[0.2em] text-white/15">
-            {subtitle}
-          </span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ArchivedSection({
-  archivedJobs,
-  activeTab,
-  selectionMode,
-  selectedIds,
-  onToggleSelect,
-  onCancel,
-  onOpen,
-  onDelete,
-  onShowHistory,
-}: {
-  archivedJobs: DownloadJob[];
-  activeTab: TabFilter;
-  selectionMode: boolean;
-  selectedIds: Set<string>;
-  onToggleSelect: (id: string) => void;
-  onCancel: (job: DownloadJob) => void | Promise<void>;
-  onOpen: (job: DownloadJob) => void | Promise<void>;
-  onDelete: (jobId: string) => void | Promise<void>;
-  onShowHistory: () => void;
-}) {
-  const filteredArchived = activeTab === "completed"
-    ? archivedJobs.filter(j => j.status === "completed")
-    : activeTab === "failed"
-      ? archivedJobs.filter(j => j.status === "failed" || j.status === "cancelled")
-      : archivedJobs;
-  const latestFiltered = filteredArchived[0];
-
-  if (!filteredArchived.length) {
-    return (
-      <section className="w-full space-y-4">
-        <SectionHeader title="Transfer Log" subtitle="Finished downloads and history" />
-        <div className="flex h-24 items-center justify-center rounded-[2rem] border border-dashed border-white/5 bg-white/[0.01] px-8 py-12 text-center text-sm font-medium text-zinc-600">
-          No historical data available.
+    <section className="space-y-3">
+      <div className="flex items-baseline justify-between gap-4 border-b border-white/[0.06] pb-3">
+        <div className="space-y-0.5">
+          <div className="flex items-baseline gap-2">
+            <h2 className="text-base font-semibold text-white">{title}</h2>
+            <span className="text-sm tabular-nums text-white/35">
+              {count}
+              {count !== total ? ` of ${total}` : ""}
+            </span>
+          </div>
+          <p className="text-sm text-white/40">{description}</p>
         </div>
-      </section>
-    );
-  }
+      </div>
+      {children}
+    </section>
+  );
+}
 
+function NoMatches({ label }: { label: string }) {
   return (
-    <section className="w-full space-y-4">
-      <SectionHeader title="Transfer Log" subtitle="Finished downloads and history" />
-      <div className="grid gap-4">
-        <DownloadRow 
-          job={latestFiltered} 
-          onCancel={onCancel} 
-          onOpen={onOpen}
-          onDelete={onDelete}
-          isSelectionMode={selectionMode}
-          isSelected={selectedIds.has(latestFiltered.id)}
-          onToggleSelect={() => onToggleSelect(latestFiltered.id)}
+    <div className="rounded-2xl border border-dashed border-white/[0.08] px-6 py-10 text-center">
+      <p className="text-sm text-white/45">{label}</p>
+    </div>
+  );
+}
+
+function EmptyState() {
+  return (
+    <section
+      aria-label="Empty downloads state"
+      className="overflow-hidden rounded-3xl border border-white/[0.08] bg-white/[0.015]"
+    >
+      <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-3">
+        <span className="text-xs font-medium text-white/45">Examples</span>
+        <span className="text-xs text-white/30">How rows will appear</span>
+      </div>
+      <div className="grid gap-px bg-white/[0.04] sm:grid-cols-3">
+        <GhostRow
+          icon={Loader2}
+          tone="live"
+          status="Downloading"
+          title="Sample — 2.1 GB / 4.8 GB"
+          meta="Speed 18.4 MB/s · ETA 2m"
+          progress={44}
+          spinIcon
         />
-        {filteredArchived.length > 1 && (
-          <m.button
-            type="button"
-            onClick={onShowHistory}
-            whileHover={{ scale: 1.005 }}
-            className="flex items-center justify-between rounded-2xl border border-white/5 bg-white/[0.02] px-6 py-3.5 transition-all hover:bg-white/[0.04] hover:border-white/10 group"
-          >
-            <div className="flex items-center gap-3">
-              <div className="flex size-8 items-center justify-center rounded-xl bg-white/[0.03] border border-white/5 group-hover:bg-white/[0.06] transition-colors">
-                <History className="size-4 text-zinc-500 group-hover:text-white transition-colors" />
-              </div>
-              <span className="text-[11px] font-black uppercase tracking-widest text-zinc-500 group-hover:text-white transition-colors">
-                View {filteredArchived.length - 1} more item{filteredArchived.length - 1 !== 1 ? 's' : ''}
-              </span>
-            </div>
-            <ChevronRight className="size-4 text-zinc-700 group-hover:text-white transition-all transform group-hover:translate-x-1" />
-          </m.button>
-        )}
+        <GhostRow
+          icon={CheckCircle2}
+          tone="ok"
+          status="Completed"
+          title="Sample — finished 1.2 GB"
+          meta="Saved to ~/Movies"
+          progress={100}
+        />
+        <GhostRow
+          icon={AlertTriangle}
+          tone="danger"
+          status="Failed"
+          title="Sample — network error"
+          meta="Tap retry from the row menu"
+          progress={62}
+        />
+      </div>
+
+      <div className="flex flex-col items-start gap-4 px-6 py-8 sm:flex-row sm:items-center sm:justify-between sm:px-8">
+        <div className="space-y-1">
+          <h3 className="text-lg font-semibold text-white">No downloads yet</h3>
+          <p className="max-w-md text-sm text-white/50">
+            Pick a movie or episode from the Cloud tab and start a transfer. Active
+            downloads, the queue, and your archive will all live here.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-white/55">
+          <ArrowDownToLine className="size-4 text-white/50" />
+          <span>From the Cloud tab, tap a poster and choose Download</span>
+        </div>
       </div>
     </section>
   );
 }
 
-function EmptyDownloadsState() {
+function GhostRow({
+  icon: Icon,
+  tone,
+  status,
+  title,
+  meta,
+  progress,
+  spinIcon,
+}: {
+  icon: typeof Download;
+  tone: ReturnType<typeof statusMeta>["tone"];
+  status: string;
+  title: string;
+  meta: string;
+  progress: number;
+  spinIcon?: boolean;
+}) {
   return (
-    <m.div
-      initial={{ opacity: 0, scale: 0.98 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ duration: 0.5, ease: [0.19, 1, 0.22, 1] }}
-      className="group relative rounded-[2.5rem] border border-dashed border-white/10 bg-white/[0.01] px-6 text-center transition-all hover:bg-white/[0.02] py-14"
-    >
-      <div className="mx-auto flex items-center justify-center rounded-[2rem] border border-white/10 bg-white/5 transition-transform duration-500 group-hover:scale-110 size-14">
-        <Download className="size-6 text-white/40" />
+    <div className="relative bg-[hsl(0_0%_5%)] p-5">
+      <div className="flex items-center gap-2 text-xs font-medium">
+        <Icon
+          className={cn(
+            "size-3.5",
+            toneClass(tone),
+            spinIcon && "animate-spin [animation-duration:2.4s]",
+          )}
+        />
+        <span className={cn("uppercase tracking-wide", toneClass(tone))}>{status}</span>
       </div>
-      <h3 className="font-bold text-white mt-5 text-base">Standby Mode</h3>
-      <p className="mx-auto max-w-sm text-zinc-500 mt-2 text-xs leading-relaxed">
-        The pipeline is idle. Initiate a transfer from the cloud drive to begin acquisition.
-      </p>
-    </m.div>
+      <p className="mt-3 text-sm font-medium text-white/75">{title}</p>
+      <p className="mt-0.5 text-xs text-white/35">{meta}</p>
+      <div className="mt-4 h-1 w-full overflow-hidden rounded-full bg-white/[0.06]">
+        <div
+          className={cn(
+            "h-full rounded-full",
+            tone === "ok"
+              ? "bg-emerald-400/70"
+              : tone === "danger"
+                ? "bg-red-400/70"
+                : "bg-white/70",
+          )}
+          style={{ width: `${progress}%` }}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -554,7 +634,9 @@ const DownloadRow = memo(function DownloadRow({
   isSelectionMode,
   isSelected,
   onToggleSelect,
-  compact,
+  menuOpen,
+  onMenuToggle,
+  onMenuClose,
 }: {
   job: DownloadJob;
   onCancel: (job: DownloadJob) => void | Promise<void>;
@@ -563,198 +645,276 @@ const DownloadRow = memo(function DownloadRow({
   isSelectionMode?: boolean;
   isSelected?: boolean;
   onToggleSelect?: () => void;
-  compact?: boolean;
+  menuOpen?: boolean;
+  onMenuToggle?: () => void;
+  onMenuClose?: () => void;
 }) {
-  const meta = statusMeta(job.status);
-  const StatusIcon = meta.icon;
   const active = isActiveStatus(job.status);
   const timeRemaining = formatTimeRemaining(job);
+  const sourceKey = sourceIconKey(job.sourceKind);
+
+  const handleRowClick = () => {
+    if (isSelectionMode) onToggleSelect?.();
+  };
+
+  const handleKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!isSelectionMode) return;
+    if (e.key === " " || e.key === "Enter") {
+      e.preventDefault();
+      onToggleSelect?.();
+    }
+  };
 
   return (
-    <m.div
-      layout
+    <div
+      role="button"
+      tabIndex={isSelectionMode ? 0 : -1}
+      onClick={handleRowClick}
+      onKeyDown={handleKey}
       className={cn(
-        "group relative rounded-[2rem] border transition-all w-full min-w-0 overflow-hidden",
-        compact ? "p-4 xl:p-5" : "p-6",
-        isSelected 
-          ? "border-white/30 bg-white/[0.08] shadow-elevation-2" 
-          : "border-white/[0.06] bg-white/[0.015] hover:border-white/[0.12] hover:bg-white/[0.03] hover:shadow-elevation-1"
+        "group relative flex w-full items-start gap-4 rounded-2xl border bg-white/[0.015] p-4 text-left transition-colors sm:gap-5 sm:p-5",
+        isSelected
+          ? "border-white/30 bg-white/[0.06]"
+          : "border-white/[0.07] hover:border-white/[0.16] hover:bg-white/[0.03]",
+        isSelectionMode && "cursor-pointer",
       )}
-      onClick={() => isSelectionMode && onToggleSelect?.()}
     >
-      <div className={cn("flex flex-col xl:flex-row xl:items-center", compact ? "gap-4" : "gap-6")}>
-        {isSelectionMode && (
-          <div className="flex items-center justify-center shrink-0">
-            <div className={cn(
-              "flex size-6 items-center justify-center rounded-lg border transition-all",
-              isSelected ? "bg-white border-white text-black" : "border-white/20 text-transparent"
-            )}>
-              <CheckSquare size={14} strokeWidth={3} />
-            </div>
-          </div>
-        )}
+      {/* Selection checkbox or source icon */}
+      {isSelectionMode ? (
+        <div
+          className={cn(
+            "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-md border transition-colors",
+            isSelected ? "border-white bg-white text-black" : "border-white/25 text-transparent",
+          )}
+        >
+          <CheckSquare className="size-3.5" strokeWidth={3} />
+        </div>
+      ) : (
+        <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-xl border border-white/[0.08] bg-white/[0.03] text-white/55">
+          <SourceIconByKey kind={sourceKey} />
+        </div>
+      )}
 
-        {/* Left: Icon area for source type */}
-        <div className="hidden sm:flex shrink-0">
-          <div className={cn(
-            "flex size-12 items-center justify-center rounded-[1.25rem] border transition-all",
-            isSelected
-              ? "border-white/20 bg-white/[0.08]"
-              : "border-white/[0.06] bg-white/[0.02] group-hover:bg-white/[0.04] group-hover:border-white/[0.1]"
-          )}>
-            {job.sourceKind === "gdrive" ? (
-              <Cloud className="size-5 text-white/40" />
-            ) : job.sourceKind === "direct" ? (
-              <Globe className="size-5 text-white/40" />
-            ) : (
-              <HardDrive className="size-5 text-white/40" />
-            )}
-          </div>
+      {/* Center column */}
+      <div className="min-w-0 flex-1 space-y-2">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <StatusBadge status={job.status} />
+          <span className="text-white/30">·</span>
+          <span className="text-white/40">
+            {job.sourceKind.replace(/-/g, " ")}
+          </span>
+          {active ? (
+            <span className="text-white/30">·</span>
+          ) : null}
+          {active && job.speedBytesPerSecond ? (
+            <span className="text-white/65 tabular-nums">
+              {formatSpeed(job.speedBytesPerSecond)}
+            </span>
+          ) : null}
+          {active && timeRemaining ? (
+            <>
+              <span className="text-white/30">·</span>
+              <span className="text-white/65 tabular-nums">{timeRemaining} left</span>
+            </>
+          ) : null}
         </div>
 
-        {/* Center: Content */}
-        <div className="min-w-0 flex-1 overflow-hidden">
-          <div className={cn("flex flex-wrap items-center gap-2.5", compact ? "mb-2.5" : "mb-3")}>
-            <span
-              className={cn(
-                "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[9px] font-black uppercase tracking-wider",
-                meta.className,
-              )}
-            >
-              <StatusIcon className="size-3" />
-              {meta.label}
-            </span>
-            <span className="rounded-full border border-white/5 bg-white/[0.03] px-2.5 py-1 text-[9px] font-bold uppercase tracking-widest text-zinc-500">
-              {job.sourceKind.replace(/-/g, " ")}
-            </span>
-          </div>
-          
-          <div className="space-y-0.5">
-            <h3 className="truncate font-bold tracking-tight text-white text-base sm:text-lg">{job.title}</h3>
-            <p className="truncate text-xs font-medium text-zinc-600 font-mono">{job.fileName}</p>
-          </div>
+        <div className="space-y-0.5">
+          <h3 className="truncate text-[15px] font-semibold text-white">{job.title}</h3>
+          <p className="truncate text-xs text-white/35 font-mono">{job.fileName}</p>
+        </div>
 
-          <div className={cn(
-            "flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[10px] font-bold uppercase tracking-widest text-zinc-500",
-            compact ? "mt-2.5" : "mt-4"
-          )}>
-            <div className="flex items-center gap-1.5">
-              <span className="text-white/30">Size</span>
-              <span className="text-white/70">{formatFileSize(job.downloadedBytes)} / {formatFileSize(job.totalBytes)}</span>
-            </div>
-            {job.status === "downloading" && (
-              <div className="flex items-center gap-1.5">
-                <span className="text-white/30">Speed</span>
-                <span className="text-white/70">{formatSpeed(job.speedBytesPerSecond)}</span>
-              </div>
-            )}
-            {timeRemaining && (
-              <div className="flex items-center gap-1.5">
-                <span className="text-white/30">ETA</span>
-                <span className="text-white/70">{timeRemaining}</span>
-              </div>
-            )}
-            <div className="flex items-center gap-1.5">
-              <span className="text-white/30">Date</span>
-              <span className="text-white/70">{new Date(job.updatedAt).toLocaleDateString()}</span>
-            </div>
-          </div>
-          
+        <div className="flex items-center gap-3 text-xs text-white/45">
+          <span className="tabular-nums">
+            {formatFileSize(job.downloadedBytes)} of {formatFileSize(job.totalBytes)}
+          </span>
+          <span className="text-white/15">·</span>
+          <span>{formatRelativeDate(job.updatedAt)}</span>
           {job.error && (
-            <div className="mt-3 flex items-start gap-3 rounded-2xl border border-red-500/10 bg-red-500/[0.03] p-3.5">
-              <AlertTriangle className="size-4 text-red-400/70 mt-0.5 shrink-0" />
-              <p className="text-xs font-medium text-zinc-400 leading-relaxed">
-                {job.error}
-              </p>
-            </div>
+            <>
+              <span className="text-white/15">·</span>
+              <span className="truncate text-red-300/85">{job.error}</span>
+            </>
           )}
         </div>
 
-        {/* Right: Progress + Actions */}
-        <div className={cn("flex flex-col xl:items-end w-full xl:w-auto", compact ? "xl:min-w-[240px] gap-3" : "xl:min-w-[280px] gap-4")}>
-          <div className="w-full">
-            <div className="mb-2 flex items-center justify-between text-[10px] font-black uppercase tracking-widest">
-              <span className={active ? "text-white/40" : "text-zinc-600"}>
-                {active ? "Progress" : "Complete"}
-              </span>
-              <span className={cn(
-                "tabular-nums",
-                active ? "text-white" : "text-zinc-500"
-              )}>{Math.round(job.progress)}%</span>
-            </div>
-            <div className="h-1.5 overflow-hidden rounded-full bg-white/5">
+        {/* Progress */}
+        {active && (
+          <div className="flex items-center gap-3 pt-1">
+            <div className="h-1 flex-1 overflow-hidden rounded-full bg-white/[0.06]">
               <m.div
-                className={cn(
-                  "h-full transition-all",
-                  active ? "bg-white shadow-[0_0_15px_rgba(255,255,255,0.5)]" : "bg-white/30"
-                )}
-                initial={{ width: 0 }}
+                className="h-full rounded-full bg-white"
+                initial={false}
                 animate={{ width: `${Math.max(0, Math.min(100, job.progress))}%` }}
-                transition={{ duration: 0.8, ease: [0.19, 1, 0.22, 1] }}
+                transition={{ duration: 0.5, ease: [0.19, 1, 0.22, 1] }}
               />
             </div>
+            <span className="w-9 text-right text-xs tabular-nums text-white/60">
+              {Math.round(job.progress)}%
+            </span>
           </div>
+        )}
+      </div>
 
-          <div className="flex flex-wrap gap-2 w-full xl:justify-end">
-            {!isSelectionMode && (
-              <>
-                {job.targetExists ? (
-                  <Button
-                    type="button"
+      {/* Right column — actions */}
+      {!isSelectionMode && (
+        <div className="flex shrink-0 items-center gap-1.5">
+          {active ? (
+            <Button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                void onCancel(job);
+              }}
+              variant="ghost"
+              size="sm"
+              className="h-9 rounded-xl text-white/65 hover:bg-white/[0.06] hover:text-white"
+            >
+              {job.status === "downloading" ? (
+                <Loader2 className="mr-1.5 size-3.5 animate-spin" />
+              ) : (
+                <PauseCircle className="mr-1.5 size-3.5" />
+              )}
+              {job.status === "downloading" ? "Stop" : "Cancel"}
+            </Button>
+          ) : job.targetExists ? (
+            <Button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                void onOpen(job);
+              }}
+              variant="ghost"
+              size="sm"
+              className="h-9 rounded-xl text-white/65 hover:bg-white/[0.06] hover:text-white"
+            >
+              <FolderOpen className="mr-1.5 size-3.5" />
+              Open
+            </Button>
+          ) : (
+            <span className="inline-flex h-9 items-center rounded-xl border border-white/[0.07] bg-white/[0.02] px-3 text-xs text-white/30">
+              File removed
+            </span>
+          )}
+
+          <div className="relative">
+            <Button
+              type="button"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              onClick={(e) => {
+                e.stopPropagation();
+                onMenuToggle?.();
+              }}
+              variant="ghost"
+              size="icon"
+              className="size-9 rounded-xl text-white/45 hover:bg-white/[0.06] hover:text-white"
+            >
+              <MoreHorizontal className="size-4" />
+            </Button>
+            <AnimatePresence>
+              {menuOpen && (
+                <>
+                  <div
+                    className="fixed inset-0 z-10"
                     onClick={(e) => {
                       e.stopPropagation();
-                      void onOpen(job);
+                      onMenuClose?.();
                     }}
-                    variant="outline"
-                    className="h-10 rounded-xl border-white/10 bg-white/[0.04] px-5 text-[10px] font-black uppercase tracking-widest text-white hover:bg-white hover:text-black transition-all duration-300"
+                  />
+                  <m.div
+                    initial={{ opacity: 0, y: -4, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -4, scale: 0.98 }}
+                    transition={{ duration: 0.12, ease: [0.19, 1, 0.22, 1] }}
+                    role="menu"
+                    className="absolute right-0 top-11 z-20 w-44 overflow-hidden rounded-xl border border-white/10 bg-[hsl(0_0%_9%)] p-1 shadow-2xl"
                   >
-                    <FolderOpen className="mr-2 size-3.5" />
-                    Navigate
-                  </Button>
-                ) : (
-                  !active && (
-                    <div className="inline-flex h-10 items-center rounded-xl border border-white/10 bg-white/5 px-5 text-[10px] font-black uppercase tracking-widest text-zinc-500">
-                      <Trash2 className="mr-2 size-3.5" />
-                      Deleted
-                    </div>
-                  )
-                )}
-                {active && (
-                  <Button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void onCancel(job);
-                    }}
-                    variant="outline"
-                    className="h-10 rounded-xl border-white/10 bg-white/[0.02] px-5 text-[10px] font-black uppercase tracking-widest text-zinc-500 hover:bg-white/10 hover:text-white transition-all duration-300"
-                  >
-                    {job.status === "downloading" ? (
-                      <Loader2 className="mr-2 size-3.5 animate-spin" />
-                    ) : (
-                      <PauseCircle className="mr-2 size-3.5" />
+                    {job.targetExists && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onMenuClose?.();
+                          void onOpen(job);
+                        }}
+                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-white/80 hover:bg-white/[0.06]"
+                      >
+                        <FolderOpen className="size-3.5" />
+                        Open file
+                      </button>
                     )}
-                    Abort
-                  </Button>
-                )}
-                {!active && (
-                  <Button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void onDelete(job.id);
-                    }}
-                    variant="ghost"
-                    className="size-10 rounded-xl bg-white/5 text-zinc-500 hover:bg-white/10 hover:text-white"
-                  >
-                    <Trash2 className="size-4" />
-                  </Button>
-                )}
-              </>
-            )}
+                    {active && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onMenuClose?.();
+                          void onCancel(job);
+                        }}
+                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-white/80 hover:bg-white/[0.06]"
+                      >
+                        <X className="size-3.5" />
+                        {job.status === "downloading" ? "Stop" : "Cancel transfer"}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onMenuClose?.();
+                        void onDelete(job.id);
+                      }}
+                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-red-300 hover:bg-red-500/10"
+                    >
+                      <Trash2 className="size-3.5" />
+                      Remove from list
+                    </button>
+                  </m.div>
+                </>
+              )}
+            </AnimatePresence>
           </div>
         </div>
-      </div>
-    </m.div>
+      )}
+    </div>
   );
 });
+
+function StatusBadge({ status }: { status: DownloadJobStatus }) {
+  const meta = statusMeta(status);
+
+  const dot =
+    meta.tone === "ok"
+      ? "bg-emerald-400"
+      : meta.tone === "danger"
+        ? "bg-red-400"
+        : meta.tone === "warn"
+          ? "bg-amber-300"
+          : meta.tone === "live"
+            ? "bg-white"
+            : "bg-white/35";
+
+  const isLive = meta.tone === "live";
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5",
+        meta.tone === "live" ? "bg-white/[0.08]" : "bg-transparent",
+        meta.tone === "live" ? "text-white" : toneClass(meta.tone),
+      )}
+    >
+      <span className="relative flex size-2">
+        {isLive && (
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white/60 opacity-60" />
+        )}
+        <span className={cn("relative inline-flex size-2 rounded-full", dot)} />
+      </span>
+      <span className="font-medium">{meta.label}</span>
+    </span>
+  );
+}

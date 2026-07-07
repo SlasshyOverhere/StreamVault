@@ -1039,17 +1039,12 @@ export const searchContent = async (
   year?: number,
   media_type?: string,
 ): Promise<HybridSearchResult[]> => {
-  try {
-    const response = await invoke<{ results: HybridSearchResult[] }>("search_content", {
-      query,
-      year,
-      mediaType: media_type,
-    });
-    return response.results;
-  } catch (error) {
-    console.error("Failed to search content:", error);
-    return [];
-  }
+  const response = await invoke<{ results: HybridSearchResult[] }>("search_content", {
+    query,
+    year,
+    mediaType: media_type,
+  });
+  return response.results;
 };
 
 export const getDownloadJobs = async (): Promise<DownloadJob[]> => {
@@ -1705,10 +1700,12 @@ export interface WatchlistSyncStatus {
 
 export const getMovieDetails = async (
   movieId: number,
+  imdbId?: string | null,
 ): Promise<TmdbMovieDetails | null> => {
   try {
     const details = await invoke<TmdbMovieDetails>("get_movie_details", {
       movieId,
+      imdbId: imdbId ?? null,
     });
     return details;
   } catch (error) {
@@ -1722,12 +1719,14 @@ export const getTmdbReleaseSchedule = async (
   mediaType: "movie" | "tv",
   seasonNumber?: number | null,
   episodeNumber?: number | null,
+  imdbId?: string | null,
 ): Promise<TmdbReleaseSchedule> => {
   return await invoke<TmdbReleaseSchedule>("get_tmdb_release_schedule", {
     tmdbId,
     mediaType,
     seasonNumber: seasonNumber ?? null,
     episodeNumber: episodeNumber ?? null,
+    imdbId: imdbId ?? null,
   });
 };
 
@@ -1838,9 +1837,13 @@ export const syncWatchlist = async (): Promise<WatchlistSyncStatus> => {
 // Get TV show details including seasons from TMDB
 export const getTvDetails = async (
   tvId: number,
+  imdbId?: string | null,
 ): Promise<TmdbShowDetails | null> => {
   try {
-    const details = await invoke<TmdbShowDetails>("get_tv_details", { tvId });
+    const details = await invoke<TmdbShowDetails>("get_tv_details", {
+      tvId,
+      imdbId: imdbId ?? null,
+    });
     return details;
   } catch (error) {
     console.error("Failed to get TV details:", error);
@@ -1852,11 +1855,12 @@ export const getTvDetails = async (
 export const getTvSeasonEpisodes = async (
   tvId: number,
   seasonNumber: number,
+  imdbId?: string | null,
 ): Promise<TmdbSeasonDetails | null> => {
   try {
     const seasonDetails = await invoke<TmdbSeasonDetails>(
       "get_tv_season_episodes",
-      { tvId, seasonNumber },
+      { tvId, seasonNumber, imdbId: imdbId ?? null },
     );
     return seasonDetails;
   } catch (error) {
@@ -2059,8 +2063,33 @@ export const setBetaEnabled = (enabled: boolean): void => {
   }
 };
 
-// ==================== CLOUD CACHE ====================
+// ==================== TMDB KEY NOTICE ====================
 
+const TMDB_KEY_NOTICE_DISMISSED_KEY = "slasshyvault_tmdb_key_notice_dismissed";
+
+// Check if the user has explicitly dismissed the TMDB key setup notice
+export const isTmdbKeyNoticeDismissed = (): boolean => {
+  try {
+    return localStorage.getItem(TMDB_KEY_NOTICE_DISMISSED_KEY) === "true";
+  } catch (error) {
+    console.error("Failed to read TMDB key notice state:", error);
+    return false;
+  }
+};
+
+// Persist dismissal so the notice only shows until the user opts out
+export const setTmdbKeyNoticeDismissed = (dismissed: boolean): void => {
+  try {
+    localStorage.setItem(
+      TMDB_KEY_NOTICE_DISMISSED_KEY,
+      dismissed ? "true" : "false"
+    );
+  } catch (error) {
+    console.error("Failed to save TMDB key notice state:", error);
+  }
+};
+
+// ==================== CLOUD CACHE ====================
 export interface CloudCacheInfo {
   enabled: boolean;
   cache_dir: string | null;
@@ -2501,4 +2530,140 @@ export const consumePendingSubtitlePath = (mediaId: number): string | null => {
   const path = pendingSubtitlePaths.get(mediaId) ?? null
   pendingSubtitlePaths.delete(mediaId)
   return path
+}
+
+// ─── Stremio addon support ─────────────────────────────────────────────────
+
+export type StremioAddonStatus = 'available' | 'unavailable' | 'configRequired'
+
+export interface StremioResource {
+  /** Either a string ("catalog", "stream", "subtitles") or an object form. */
+  name: string
+  types?: string[]
+  idPrefixes?: string[]
+}
+
+export interface StremioCatalogRef {
+  type: string
+  id: string
+  name?: string
+}
+
+export interface StremioAddon {
+  id: string
+  url: string
+  name: string
+  version: string
+  description?: string | null
+  logo?: string | null
+  types: string[]
+  resources: (string | StremioResource)[]
+  idPrefixes: string[]
+  catalogs: StremioCatalogRef[]
+  config?: string | null
+  status: StremioAddonStatus
+  installedAt: string
+  lastCheckedAt: string
+}
+
+export interface StremioCatalogResponse {
+  metas?: unknown[]
+}
+
+export interface StremioMetaResponse {
+  meta?: unknown
+}
+
+export interface StremioStreamResponse {
+  streams?: unknown[]
+}
+
+export interface StremioStreamLike {
+  url?: string | null
+  infoHash?: string | null
+  title?: string | null
+  name?: string | null
+  ytId?: string | null
+}
+
+export type DebridKind =
+  | 'real_debrid'
+  | 'all_debrid'
+  | 'premiumize'
+  | 'torbox'
+  | 'offcloud'
+  | 'easydebrid'
+  | 'linksnappy'
+  | 'mega_debrid'
+
+export interface DebridService {
+  kind: DebridKind
+  username: string
+  /** API key. Sent to backend only; not exposed in UI listings. */
+  apiKey: string
+  isDefault: boolean
+}
+
+export const listStremioAddons = async (): Promise<StremioAddon[]> =>
+  await invoke<StremioAddon[]>('stremio_list_addons')
+
+export const addStremioAddon = async (
+  url: string,
+  config?: string | null
+): Promise<StremioAddon> =>
+  await invoke<StremioAddon>('stremio_add_addon', { url, config: config ?? null })
+
+export const removeStremioAddon = async (id: string): Promise<boolean> =>
+  await invoke<boolean>('stremio_remove_addon', { id })
+
+export const fetchStremioCatalog = async (
+  addonId: string,
+  type: string,
+  catalogId: string,
+  extra?: Record<string, string>
+): Promise<StremioCatalogResponse> =>
+  await invoke<StremioCatalogResponse>('stremio_fetch_catalog', {
+    addonId,
+    kind: type,
+    catalogId,
+    extra: extra ?? null,
+  })
+
+export const fetchStremioMeta = async (
+  addonId: string,
+  type: string,
+  id: string
+): Promise<StremioMetaResponse> =>
+  await invoke<StremioMetaResponse>('stremio_fetch_meta', { addonId, kind: type, id })
+
+export const fetchStremioStreams = async (
+  addonId: string,
+  type: string,
+  id: string
+): Promise<StremioStreamResponse> =>
+  await invoke<StremioStreamResponse>('stremio_fetch_streams', {
+    addonId,
+    kind: type,
+    id,
+  })
+
+export const resolveStremioStream = async (
+  stream: StremioStreamLike
+): Promise<string> =>
+  await invoke<string>('stremio_resolve_stream', { stream })
+
+export const addDebridService = async (
+  kind: DebridKind,
+  apiKey: string
+): Promise<DebridService> =>
+  await invoke<DebridService>('debrid_add_service', { kind, apiKey })
+
+export const removeDebridService = async (kind: DebridKind): Promise<boolean> =>
+  await invoke<boolean>('debrid_remove_service', { kind })
+
+export const listDebridServices = async (): Promise<DebridService[]> =>
+  await invoke<DebridService[]>('debrid_list_services')
+
+export const setDefaultDebridService = async (kind: DebridKind): Promise<void> => {
+  await invoke('debrid_set_default', { kind })
 }

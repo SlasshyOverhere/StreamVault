@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef, memo, Component, type ReactNode, type ErrorInfo } from 'react'
 import { invoke } from '@tauri-apps/api/tauri'
 import { listen } from '@tauri-apps/api/event'
-import { open } from '@tauri-apps/api/dialog'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useToast } from '@/components/ui/use-toast'
 import { RemoteSearchBar } from './RemoteSearchBar'
@@ -10,7 +9,10 @@ import { RemoteMediaDetail } from './RemoteMediaDetail'
 import { RemoteQualitySelector } from './RemoteQualitySelector'
 import { RemoteCacheStatusBar } from './RemoteCacheStatusBar'
 import { RemoteCleanupDialog } from './RemoteCleanupDialog'
-import { Film, Play, X, Loader2, ArrowLeft, Check, Clock } from 'lucide-react'
+import { AddonSetupWizard } from './AddonSetupWizard'
+import { Film, Play, X, ArrowLeft, Check, Clock } from 'lucide-react'
+import { listStremioAddons, fetchStremioStreams } from '@/services/api'
+import { toRemoteStreamData, type StremioRawStream } from './StremioStreamAdapter'
 import type { TmdbSearchResult, GroupedStreams, RemoteStreamData, CacheStatus } from './remote.types'
 import { getYear } from './remote.types'
 import { getCachedImageUrl } from '@/services/api'
@@ -172,7 +174,6 @@ function RemoteSourceViewInner() {
   const [remoteProgress, setRemoteProgress] = useState<RemoteProgress[]>([])
   const [libraryLimit, setLibraryLimit] = useState(50)
   const [addonUrlConfigured, setAddonUrlConfigured] = useState<boolean | null>(null)
-  const [setupAddonUrl, setSetupAddonUrl] = useState('')
   const [activeSource, setActiveSource] = useState<{ name: string; url: string } | null>(null)
   const [addonVersion, setAddonVersion] = useState<string | null>(null)
   const [addonCrashed, setAddonCrashed] = useState(false)
@@ -325,7 +326,12 @@ function RemoteSourceViewInner() {
       const config = await invoke<any>('get_config')
       const hasSources = config?.addon_sources?.length > 0
       const hasLegacyUrl = !!config?.addon_url
-      setAddonUrlConfigured(hasSources || hasLegacyUrl)
+      let hasStremio = false
+      try {
+        const stremioAddons = await invoke<any[]>('stremio_list_addons')
+        hasStremio = stremioAddons.length > 0
+      } catch { /* ignore */ }
+      setAddonUrlConfigured(hasSources || hasLegacyUrl || hasStremio)
       if (hasSources) {
         const defaultSrc = config.addon_sources.find((s: any) => s.is_default)
         const src = defaultSrc || config.addon_sources[0]
@@ -507,6 +513,53 @@ function RemoteSourceViewInner() {
     return () => { cancelled = true }
   }, [qualityOpen, groupedStreams])
 
+  // Fetch streams from all installed Stremio addons for a given IMDB ID.
+  // Returns them merged into GroupedStreams format.
+  const fetchStremioAddonStreams = useCallback(async (imdbId: string, mediaType: 'movie' | 'series', season?: number, episode?: number): Promise<GroupedStreams[]> => {
+    try {
+      const addons = await listStremioAddons()
+      if (addons.length === 0) return []
+
+      const stremioType = mediaType
+      // Stremio stream IDs: movie = tt1234567, series = tt1234567:S1E2
+      let stremioId = imdbId
+      if (stremioType === 'series' && season != null && episode != null) {
+        stremioId = `${imdbId}:S${season}E${episode}`
+      }
+
+      const results = await Promise.allSettled(
+        addons.map(async (addon) => {
+          const resp = await fetchStremioStreams(addon.id, stremioType, stremioId)
+          const streams = Array.isArray(resp.streams) ? (resp.streams as StremioRawStream[]) : []
+          return streams
+            .map((s) => toRemoteStreamData(s, { addonName: addon.name }))
+            .filter((s): s is RemoteStreamData => s !== null && s.url !== '')
+        })
+      )
+
+      const allStremioStreams = results
+        .filter((r): r is PromiseFulfilledResult<RemoteStreamData[]> => r.status === 'fulfilled')
+        .flatMap((r) => r.value)
+
+      if (allStremioStreams.length === 0) return []
+
+      // Group by quality
+      const grouped: GroupedStreams[] = []
+      for (const stream of allStremioStreams) {
+        const quality = stream.parsedQuality || 'auto'
+        const existing = grouped.find((g) => g.quality === quality)
+        if (existing) {
+          existing.streams.push(stream)
+        } else {
+          grouped.push({ quality, streams: [stream] })
+        }
+      }
+      return grouped
+    } catch {
+      return []
+    }
+  }, [])
+
   // Movie: fetch streams and open quality selector
   const handleFetchMovieStreams = useCallback(async (imdbId: string, forceRefresh = false) => {
     setFetching(true)
@@ -518,13 +571,27 @@ function RemoteSourceViewInner() {
     setCurrentEpisodeTitle('')
     imdbIdRef.current = imdbId
     try {
-      const streams = await invoke<GroupedStreams[]>('remote_get_movie_streams', { imdbId, forceRefresh })
-      setGroupedStreams(streams)
+      const [addonStreams, stremioStreams] = await Promise.all([
+        invoke<GroupedStreams[]>('remote_get_movie_streams', { imdbId, forceRefresh }).catch(() => []),
+        fetchStremioAddonStreams(imdbId, 'movie'),
+      ])
+      // Merge: addon streams first, then Stremio streams
+      const merged = [...addonStreams]
+      for (const sg of stremioStreams) {
+        const existing = merged.find((g) => g.quality === sg.quality)
+        if (existing) {
+          existing.streams.push(...sg.streams)
+        } else {
+          merged.push(sg)
+        }
+      }
+      setGroupedStreams(merged)
+      if (merged.length === 0) setStreamError('No streams found')
     } catch (e: any) {
       setStreamError(typeof e === 'string' ? e : 'Failed to load streams')
     }
     setFetching(false)
-  }, [])
+  }, [fetchStremioAddonStreams])
 
   // Series episode: fetch streams and open quality selector
   const handleFetchEpisodeStreams = useCallback(async (imdbId: string, season: number, episode: number, episodeTitle: string, forceRefresh = false) => {
@@ -548,13 +615,26 @@ function RemoteSourceViewInner() {
     }
 
     try {
-      const streams = await invoke<GroupedStreams[]>('remote_get_series_streams', { imdbId, season, episode, forceRefresh })
-      setGroupedStreams(streams)
+      const [addonStreams, stremioStreams] = await Promise.all([
+        invoke<GroupedStreams[]>('remote_get_series_streams', { imdbId, season, episode, forceRefresh }).catch(() => []),
+        fetchStremioAddonStreams(imdbId, 'series', season, episode),
+      ])
+      const merged = [...addonStreams]
+      for (const sg of stremioStreams) {
+        const existing = merged.find((g) => g.quality === sg.quality)
+        if (existing) {
+          existing.streams.push(...sg.streams)
+        } else {
+          merged.push(sg)
+        }
+      }
+      setGroupedStreams(merged)
+      if (merged.length === 0) setStreamError('No streams found')
     } catch (e: any) {
       setStreamError(typeof e === 'string' ? e : 'Failed to load streams')
     }
     setFetching(false)
-  }, [])
+  }, [fetchStremioAddonStreams])
 
   // Season pack: fetch all episode streams for a season and show in quality selector
   const handleFetchSeasonPack = useCallback(async (imdbId: string, season: number) => {
@@ -768,25 +848,12 @@ function RemoteSourceViewInner() {
   // Check if a TMDB item is already in the library
 
   // Save addon URL from setup wizard (uses new add_addon_source command)
-  const handleSaveAddonUrl = useCallback(async () => {
-    const url = setupAddonUrl.trim()
-    if (!url) return
-    try {
-      await invoke('add_addon_source', { name: 'Default', url })
-      setAddonUrlConfigured(true)
-      loadRemoteLibrary()
-      window.dispatchEvent(new CustomEvent('config-saved'))
-      toast({ title: 'Source added', description: 'You can now stream content from the External tab.' })
-    } catch (e: any) {
-      toast({ title: 'Failed to save', description: e?.message || 'Could not save addon URL.', variant: 'destructive' })
-    }
-  }, [setupAddonUrl, loadRemoteLibrary, toast])
-
-  const [binaryInstalling, setBinaryInstalling] = useState(false)
+  // (moved into AddonSetupWizard; this component no longer owns the setup flow)
 
   // Binary install handler (Go binary drag-and-drop)
+  // (the dropzone now lives inside AddonSetupWizard; window-level file drops
+  // are still received here because the Tauri event is global to the webview)
   const handleBinaryInstall = useCallback(async (filePath: string) => {
-    setBinaryInstalling(true)
     setAddonCrashed(false)
     try {
       const result = await invoke<any>('install_addon_binary', { filePath, name: 'Custom Addon Binary' })
@@ -807,8 +874,6 @@ function RemoteSourceViewInner() {
       else if (msg.includes('.exe')) description = 'On Windows, the file must have an .exe extension.'
       else if (msg.includes('Failed to start')) description = 'The binary failed to start. Check that no other instance is running and the port is not in use.'
       toast({ title: 'Installation failed', description, variant: 'destructive' })
-    } finally {
-      setBinaryInstalling(false)
     }
   }, [loadRemoteLibrary, toast])
 
@@ -837,100 +902,41 @@ function RemoteSourceViewInner() {
   // Show setup wizard if addon URL is not configured
   if (addonUrlConfigured === false) {
     return (
-      <div className="h-full flex flex-col relative">
-        <div className="pointer-events-none absolute -top-40 -right-40 size-[600px] rounded-full bg-amber-500/3 blur-[120px]" />
-        <div className="pointer-events-none absolute -bottom-40 -left-40 size-[500px] rounded-full bg-sky-500/2 blur-[120px]" />
-        <div className="flex-1 flex items-center justify-center relative z-10">
-          <div className="max-w-md w-full space-y-6 p-8">
-            <div className="space-y-2 text-center">
-              <div className="mx-auto size-16 rounded-2xl bg-neutral-900 border border-neutral-800 flex items-center justify-center">
-                <Film className="size-8 text-neutral-500" />
-              </div>
-              <h2 className="text-2xl font-bold text-neutral-100">No addon configured</h2>
-              <p className="text-sm text-neutral-500">
-                To stream content, you need to add your SlasshyVault addon URL.
-              </p>
-            </div>
-            {addonCrashed && (
-              <div className="rounded-lg bg-red-950/40 border border-red-900/40 px-3 py-2 flex items-center justify-between gap-2">
-                <span className="text-xs text-red-400">Addon binary crashed too many times.</span>
-                <button
-                  onClick={async () => {
-                    try {
-                      await invoke('restart_addon')
-                      setAddonCrashed(false)
-                      setAddonVersion(null)
-                      toast({ title: 'Restarting addon', description: 'Attempting to restart the addon binary...' })
-                    } catch (e) {
-                      toast({ title: 'Restart failed', description: String(e), variant: 'destructive' })
-                    }
-                  }}
-                  className="shrink-0 rounded-md bg-red-900/60 px-2.5 py-1 text-xs text-red-300 hover:bg-red-800/60 transition-colors"
-                >
-                  Retry
-                </button>
-              </div>
-            )}
-            <div className="space-y-3">
-              <button
-                onClick={async () => {
-                  const selected = await open({
-                    multiple: false,
-                    filters: [{ name: 'Executable', extensions: ['exe'] }]
-                  })
-                  if (selected && typeof selected === 'string') {
-                    handleBinaryInstall(selected)
-                  }
-                }}
-                disabled={binaryInstalling}
-                onDragOver={(e) => { e.preventDefault(); e.stopPropagation() }}
-                onDrop={(e) => {
-                  e.preventDefault()
-                  e.stopPropagation()
-                  const file = e.dataTransfer.files[0]
-                  if (file) {
-                    const path = (file as any).path || file.name
-                    handleBinaryInstall(path)
-                  }
-                }}
-                className="w-full h-16 rounded-xl border-2 border-dashed border-neutral-700 hover:border-neutral-500 disabled:opacity-40 disabled:cursor-not-allowed bg-white/[0.02] hover:bg-white/[0.04] text-neutral-400 hover:text-neutral-200 text-sm transition-all duration-200 flex flex-col items-center justify-center gap-1"
-              >
-                {binaryInstalling ? (
-                  <>
-                    <Loader2 className="size-4 animate-spin" />
-                    Installing binary...
-                  </>
-                ) : (
-                  <>
-                    <span className="text-xs">Drop addon binary here or click to browse</span>
-                    <span className="text-[10px] text-neutral-600">.exe file — no console window</span>
-                  </>
-                )}
-              </button>
-              <div className="flex items-center gap-3">
-                <div className="flex-1 h-px bg-neutral-800" />
-                <span className="text-xs text-neutral-600">or add URL manually</span>
-                <div className="flex-1 h-px bg-neutral-800" />
-              </div>
-              <input
-                type="url"
-                value={setupAddonUrl}
-                onChange={(e) => setSetupAddonUrl(e.target.value)}
-                placeholder="https://your-addon-url.com"
-                className="w-full h-12 px-4 text-sm bg-[#0A0A0A] border border-neutral-800 rounded-xl text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-amber-700/50 focus:ring-1 focus:ring-amber-700/30"
-                onKeyDown={(e) => { if (e.key === 'Enter') handleSaveAddonUrl() }}
-              />
-              <button
-                onClick={handleSaveAddonUrl}
-                disabled={!setupAddonUrl.trim()}
-                className="w-full h-11 rounded-xl bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold text-sm transition-all duration-200"
-              >
-                Save & Start Streaming
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
+      <AddonSetupWizard
+        crashed={addonCrashed}
+        onInstalled={({ url: installedUrl, version }) => {
+          setAddonUrlConfigured(true)
+          loadRemoteLibrary()
+          window.dispatchEvent(new CustomEvent('config-saved'))
+          toast({
+            title: 'Binary installed',
+            description: `Addon running at ${installedUrl}${version ? ` (v${version})` : ''}`,
+          })
+        }}
+        onSaved={() => {
+          setAddonUrlConfigured(true)
+          loadRemoteLibrary()
+          window.dispatchEvent(new CustomEvent('config-saved'))
+          toast({ title: 'Source added', description: 'You can now stream content from the External tab.' })
+        }}
+        onStremioInstalled={(addon) => {
+          setAddonUrlConfigured(true)
+          loadRemoteLibrary()
+          toast({ title: 'Stremio addon added', description: `${addon.name} v${addon.version} — streams will appear when you pick content.` })
+        }}
+        onError={(message) => toast({ title: 'Could not add addon', description: message, variant: 'destructive' })}
+        onRetryRestart={async () => {
+          try {
+            await invoke('restart_addon')
+            setAddonCrashed(false)
+            setAddonVersion(null)
+            toast({ title: 'Restarting addon', description: 'Attempting to restart the addon binary...' })
+          } catch (e: any) {
+            toast({ title: 'Restart failed', description: String(e?.message || e), variant: 'destructive' })
+            throw e
+          }
+        }}
+      />
     )
   }
 

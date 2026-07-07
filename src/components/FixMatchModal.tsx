@@ -114,12 +114,10 @@ export function FixMatchModal({ open, onOpenChange, item, onSuccess }: FixMatchM
       if (currentToken !== searchTokenRef.current) return
 
       console.error("Search failed", error)
-      const errorMessage = typeof error === "string" ? error : (error as { message?: string })?.message || "Unknown error"
       toast({
         title: "Search Failed",
-        description: errorMessage.includes("API key")
-          ? "API key not configured. Please add it in Settings."
-          : `Search error: ${errorMessage}`,
+        description:
+          "We couldn't search TMDB for this title. You can paste a TMDB or IMDb URL or ID above to fix the match manually.",
         variant: "destructive"
       })
       dispatch({ type: "SET_SEARCHING", value: false })

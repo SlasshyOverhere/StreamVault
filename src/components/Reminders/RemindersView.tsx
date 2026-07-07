@@ -1,11 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
-  Search, Film, Tv, Bell,
-  Loader2, TrendingUp, Globe, Clapperboard, Bookmark
+  Search, Film, Tv, Loader2, Bookmark, Bell, Sparkles, ArrowUpRight,
 } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { Switch } from '@/components/ui/switch'
 import { useToast } from '@/components/ui/use-toast'
 import {
@@ -14,6 +12,8 @@ import {
   createMovieReminder,
   updateMovieReminder,
   getTmdbTrending,
+  getMovieDetails,
+  getTvDetails,
   getTmdbImageUrl,
   getConfig,
   saveConfig,
@@ -37,14 +37,52 @@ import { WatchlistList } from './WatchlistList'
 import { LazyMotion, domAnimation, m, AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
 
+type Tab = 'discover' | 'reminders' | 'watchlist'
+const TABS: { id: Tab; label: string; icon: typeof Search; hint: string }[] = [
+  { id: 'discover',  label: 'Discover',  icon: Search,   hint: 'Search TMDB' },
+  { id: 'reminders', label: 'Reminders', icon: Bell,     hint: 'Scheduled alerts' },
+  { id: 'watchlist', label: 'Watchlist', icon: Bookmark, hint: 'Saved for later' },
+]
+
+// local rich type — TMDB returns minimal trending shape; we enrich from full details
+type TrendingRich = {
+  id: number
+  media_type: 'movie' | 'tv'
+  title: string
+  poster_path: string | null
+  backdrop_path: string | null
+  release_date: string | null
+  vote_average: number | null
+  overview: string | null
+}
+
+// ─── header stat block ─────────────────────────────────
+function StatBlock({ label, value, hint }: { label: string; value: number; hint: string }) {
+  return (
+    <div className="px-4 py-2.5 min-w-[88px] transition-colors hover:bg-white/[0.025]">
+      <div className="flex items-baseline gap-1.5">
+        <span className="text-[20px] font-bold tracking-[-0.03em] tabular-nums text-white leading-none">
+          {String(value).padStart(2, '0')}
+        </span>
+        <span className="text-[9px] font-bold uppercase tracking-[0.22em] text-white/45">
+          {label}
+        </span>
+      </div>
+      <div className="mt-1 text-[9px] uppercase tracking-[0.2em] text-white/35">
+        {hint}
+      </div>
+    </div>
+  )
+}
+
 export function RemindersView() {
   const { toast } = useToast()
-  const [activeTab, setActiveTab] = useState<'discover' | 'reminders' | 'watchlist'>('discover')
+  const [activeTab, setActiveTab] = useState<Tab>('discover')
   const [searchQuery, setSearchQuery] = useState('')
   const [mediaFilter, setMediaFilter] = useState<'all' | 'movie' | 'tv'>('all')
   const [isSearching, setIsSearching] = useState(false)
   const [searchResults, setSearchResults] = useState<TmdbSearchResult[]>([])
-  const [trendingSuggestions, setTrendingSuggestions] = useState<TmdbTrendingItem[]>([])
+  const [trendingRich, setTrendingRich] = useState<TrendingRich[]>([])
   const [reminders, setReminders] = useState<MovieReminder[]>([])
   const [watchlistItems, setWatchlistItems] = useState<WatchlistItem[]>([])
   const [config, setConfig] = useState<Config | null>(null)
@@ -125,13 +163,37 @@ export function RemindersView() {
     }
   }
 
+  // pull full TMDB details for each trending item so the hero card has poster + backdrop
   const loadTrendingSuggestions = async () => {
     try {
       const response = await getTmdbTrending()
-      setTrendingSuggestions(response.results.slice(0, 6))
+      const slice = response.results.slice(0, 8)
+      const enriched = await Promise.all(
+        slice.map(async (item: TmdbTrendingItem) => {
+          try {
+            const details = item.media_type === 'movie'
+              ? await getMovieDetails(item.id, null)
+              : await getTvDetails(item.id, null)
+            if (!details) return null
+            return {
+              id: item.id,
+              media_type: item.media_type,
+              title: 'title' in details ? details.title : details.name,
+              poster_path: details.poster_path ?? null,
+              backdrop_path: details.backdrop_path ?? null,
+              release_date: 'release_date' in details ? (details.release_date ?? null) : (('first_air_date' in details ? details.first_air_date : null) ?? null),
+              vote_average: details.vote_average ?? null,
+              overview: details.overview ?? null,
+            } satisfies TrendingRich
+          } catch {
+            return null
+          }
+        })
+      )
+      setTrendingRich(enriched.filter((x): x is TrendingRich => x !== null))
     } catch (error) {
       console.error('Failed to load TMDB trending suggestions:', error)
-      setTrendingSuggestions([])
+      setTrendingRich([])
     }
   }
 
@@ -163,7 +225,7 @@ export function RemindersView() {
     }
   }
 
-  const openTrendingDetails = (item: TmdbTrendingItem) => {
+  const openTrendingDetails = (item: TrendingRich) => {
     setSelectedResult({ id: item.id, type: item.media_type })
     setDetailsModalOpen(true)
   }
@@ -249,254 +311,594 @@ export function RemindersView() {
     }
   }
 
+  // stat strip — feeds the header with something real to display
+  const stats = useMemo(() => {
+    const watchlistCount = watchlistItems.length
+    const remindedCount = watchlistItems.filter(i => i.notification_enabled).length
+    const reminderCount = reminders.length
+    return { watchlistCount, remindedCount, reminderCount }
+  }, [watchlistItems, reminders])
+
   return (
     <LazyMotion features={domAnimation}>
-    <div className="h-full min-h-0 flex flex-col bg-transparent text-white relative overflow-hidden font-sans items-center">
-      <div className="absolute inset-0 bg-gradient-mesh opacity-30 pointer-events-none" />
-      <div className="absolute inset-0 bg-sheen opacity-20 pointer-events-none" />
-      <div className="absolute inset-0 noise-overlay opacity-[0.03] pointer-events-none" />
+      <div className="h-full min-h-0 flex flex-col bg-transparent text-white relative overflow-hidden font-sans">
+        <header className="relative w-full shrink-0 overflow-hidden pt-6 pb-5 px-6 md:px-10">
+          {/* atmospheric backdrop — radial spotlight from the title, like a marquee */}
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 opacity-90"
+            style={{
+              background:
+                'radial-gradient(ellipse 60% 100% at 18% 50%, hsl(0 0% 100% / 0.05) 0%, transparent 60%),' +
+                'radial-gradient(ellipse 50% 80% at 85% 20%, hsl(0 0% 100% / 0.025) 0%, transparent 65%)',
+            }}
+          />
+          {/* hairline border for separation */}
+          <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-white/[0.08] to-transparent" />
 
-      <header className="w-full max-w-5xl shrink-0 pt-12 pb-8 px-6 flex flex-col lg:flex-row lg:items-center justify-between gap-8 relative z-10 mt-8">
-        <div className="flex items-center gap-8">
-          <div className="relative group">
-            <m.div initial={{ x: -20, opacity: 0 }} animate={{ x: 0, opacity: 1 }} className="flex items-center gap-4">
-              <div className="relative">
-                <div className="absolute -inset-2 bg-white/10 blur-xl rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
-                <div className="size-12 rounded-[1.25rem] bg-white/5 border border-white/10 flex items-center justify-center shadow-elevation-1">
-                  <Clapperboard className="size-6 text-white/70" />
+          <div className="relative mx-auto max-w-[1400px]">
+            {/* eyebrow line — editorial style with date stamp */}
+            <div className="flex items-center gap-4 text-[10px] font-medium uppercase tracking-[0.32em] text-white/35">
+              <span className="inline-flex items-center gap-1.5">
+                <span className="size-1 rounded-full bg-white/50 shadow-[0_0_6px_rgba(255,255,255,0.6)]" />
+                <span className="text-white/55">No. <span className="tabular-nums text-white/75">04</span></span>
+              </span>
+              <span aria-hidden className="h-px w-8 bg-white/15" />
+              <span>Catalogue · Reminders · Queue</span>
+              <span aria-hidden className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" />
+              <span className="tabular-nums text-white/35">{new Date().toLocaleDateString(undefined, { month: 'short', day: '2-digit', year: 'numeric' }).toUpperCase()}</span>
+            </div>
+
+            {/* main row — title + stats + notif */}
+            <div className="mt-5 flex items-end justify-between gap-8">
+              <div className="min-w-0 flex-1">
+                {/* editorial title — magazine masthead style with vol. number + year + cursor */}
+                <div className="relative">
+                  <div className="flex items-center gap-3 mb-2.5">
+                    <span className="text-[10px] font-bold uppercase tracking-[0.34em] text-white/40">
+                      Vol.
+                    </span>
+                    <span className="tabular-nums text-[10px] font-bold tracking-[0.22em] text-white/75">
+                      {new Date().getFullYear()}
+                    </span>
+                    <span aria-hidden className="h-px flex-1 max-w-[100px] bg-white/15" />
+                    <span className="text-[9px] font-bold uppercase tracking-[0.32em] text-white/40">
+                      Curated
+                    </span>
+                  </div>
+                  <h1 className="text-[40px] md:text-[54px] font-bold tracking-[-0.04em] leading-[0.92] text-white">
+                    Watchlist
+                  </h1>
+                  {/* hairline rule with progressive dot terminator */}
+                  <div className="mt-3.5 flex items-center gap-2">
+                    <span className="h-[2px] w-14 rounded-full bg-white" />
+                    <span className="h-[1px] w-8 bg-white/30" />
+                    <span className="h-[1px] w-4 bg-white/15" />
+                    <span aria-hidden className="ml-1 size-1.5 rounded-full bg-white shadow-[0_0_6px_rgba(255,255,255,0.5)]" />
+                  </div>
                 </div>
+                <p className="mt-4 text-[13px] leading-relaxed text-white/45 max-w-md">
+                  Find films and series, schedule a release alert, or quietly save them for the right night.
+                </p>
               </div>
-              <div className="space-y-0.5">
-                <h1 className="text-4xl font-black tracking-tighter leading-none text-white/80">
-                  Watchlist
-                </h1>
-                <div className="flex items-center gap-2">
-                  <div className="size-1 rounded-full bg-emerald-500/50 animate-pulse" />
-                  <p className="text-white/20 text-[9px] font-black uppercase tracking-[0.3em]">
-                    Discover, queue, remind
-                  </p>
-                </div>
+
+              {/* stat strip — clean inline editorial blocks */}
+              <div className="hidden md:flex items-stretch divide-x divide-white/[0.08] rounded-lg border border-white/[0.08] bg-white/[0.02]">
+                <StatBlock label="Saved" value={stats.watchlistCount} hint="Watchlist" />
+                <StatBlock label="Reminded" value={stats.remindedCount} hint="Active alerts" />
+                <StatBlock label="Scheduled" value={stats.reminderCount} hint="Releases" />
               </div>
-            </m.div>
-          </div>
 
-          <div className="h-10 w-px bg-white/5 hidden lg:block" />
-
-          <div className="flex p-0.5 rounded-full bg-card/90 backdrop-blur-xl border border-white/10 shadow-md">
-            {[
-              { id: 'discover', label: 'Discover', icon: Globe },
-              { id: 'reminders', label: 'Reminders', icon: Bell },
-              { id: 'watchlist', label: 'Watchlist', icon: Bookmark },
-            ].map((tab) => (
-              <button
-                type="button"
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id as 'discover' | 'reminders' | 'watchlist')}
-                className={cn(
-                  'relative flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all duration-200',
-                  activeTab === tab.id ? 'text-black' : 'text-muted-foreground hover:text-foreground'
-                )}
-              >
-                {activeTab === tab.id && (
-                  <m.div layoutId="RemindersTab" className="absolute inset-0 bg-white rounded-full shadow-md" />
-                )}
-                <span className="relative z-10 flex items-center gap-1.5">
-                  <tab.icon className="size-3.5" />
-                  {tab.label}
+              <label className="flex items-center gap-3 text-[11px] font-medium uppercase tracking-[0.2em] text-white/55 cursor-pointer select-none shrink-0 self-start md:self-end pb-1 group/notif">
+                <span className="relative">
+                  Notifications
+                  {config?.notifications_enabled && (
+                    <span className="absolute -right-3 -top-0.5 size-1 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]" />
+                  )}
                 </span>
-              </button>
-            ))}
-          </div>
-        </div>
+                <Switch
+                  checked={config?.notifications_enabled || false}
+                  onCheckedChange={handleToggleNotifications}
+                  className="scale-90 data-[state=checked]:bg-white transition-colors"
+                />
+              </label>
+            </div>
 
-        <m.div initial={{ x: 20, opacity: 0 }} animate={{ x: 0, opacity: 1 }} className="flex items-center gap-4">
-          <div className="flex items-center gap-4 px-4 py-2 bg-white/[0.02] border border-white/[0.05] rounded-xl backdrop-blur-sm">
-            <div className="flex flex-col items-end">
-              <span className="text-[8px] font-black uppercase tracking-[0.2em] text-white/20 leading-none mb-1">Engine</span>
-              <div className="flex items-center gap-1.5">
-                <div className={cn('size-1 rounded-full transition-all duration-500', config?.notifications_enabled ? 'bg-white shadow-glow-sm animate-pulse' : 'bg-white/10')} />
-                <span className={cn('text-[9px] font-black uppercase tracking-widest leading-none transition-colors duration-500', config?.notifications_enabled ? 'text-white/80' : 'text-white/30')}>
-                  {config?.notifications_enabled ? 'Active' : 'Muted'}
-                </span>
+            {/* tab row — magazine-issue style with numeral prefix and underline indicator */}
+            <div className="mt-7 flex items-end gap-0">
+              {TABS.map((tab, i) => {
+                const active = activeTab === tab.id
+                const count = tab.id === 'watchlist' ? stats.watchlistCount
+                  : tab.id === 'reminders' ? stats.reminderCount
+                  : null
+                return (
+                  <button
+                    type="button"
+                    key={tab.id}
+                    role="tab"
+                    aria-selected={active}
+                    onClick={() => setActiveTab(tab.id)}
+                    className={cn(
+                      'group relative -mb-px flex items-center gap-2.5 px-4 py-3 text-[13px] font-semibold transition-all duration-200',
+                      active ? 'text-white' : 'text-white/40 hover:text-white/75',
+                    )}
+                  >
+                    {/* section numeral */}
+                    <span className={cn(
+                      'tabular-nums text-[9px] font-bold tracking-[0.2em] transition-colors duration-200',
+                      active ? 'text-white/70' : 'text-white/25 group-hover:text-white/45',
+                    )}>
+                      {String(i + 1).padStart(2, '0')}
+                    </span>
+                    <tab.icon className={cn('size-3.5 transition-transform duration-300', active && 'scale-110')} />
+                    <span className="tracking-[-0.005em]">{tab.label}</span>
+                    {count !== null && count > 0 && (
+                      <span className={cn(
+                        'tabular-nums text-[10px] font-bold px-1.5 py-0.5 rounded-full transition-colors',
+                        active ? 'bg-white text-black' : 'bg-white/[0.06] text-white/50 group-hover:bg-white/10',
+                      )}>
+                        {count}
+                      </span>
+                    )}
+                    {active && (
+                      <>
+                        {/* bold underline indicator */}
+                        <span
+                          aria-hidden
+                          className="absolute inset-x-3 -bottom-px h-[2px] bg-white"
+                        />
+                        {/* small dot terminal at end of underline */}
+                        <span
+                          aria-hidden
+                          className="absolute -bottom-[3px] right-3 size-[6px] rounded-full bg-white shadow-[0_0_8px_rgba(255,255,255,0.6)]"
+                        />
+                      </>
+                    )}
+                  </button>
+                )
+              })}
+              {/* right-side meta */}
+              <div className="ml-auto hidden lg:flex items-center gap-3 pb-3 text-[10px] font-medium uppercase tracking-[0.28em] text-white/30">
+                <span>Edition</span>
+                <span className="tabular-nums text-white/60">2025</span>
               </div>
             </div>
-            <Switch checked={config?.notifications_enabled || false} onCheckedChange={handleToggleNotifications} className="scale-75 data-[state=checked]:bg-white transition-colors" />
           </div>
-        </m.div>
-      </header>
+        </header>
 
-      <main className="flex-1 w-full min-h-0 relative z-10 overflow-hidden flex justify-center">
-        <div className="w-full max-w-5xl h-full min-h-0 overflow-hidden">
-          <AnimatePresence mode="wait">
-            {activeTab === 'discover' ? (
-              <m.div key="discover" initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -30 }} transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }} className="h-full flex flex-col items-center">
-                <ScrollArea className="w-full flex-1 px-6 pb-12 [&>div]:scrollbar-none">
-                  <div className="w-full gap-y-12 pt-4 flex flex-col items-center">
-                    <div className={cn('w-full relative group/search pt-4 max-w-3xl transition-all duration-700', searchResults.length > 0 ? 'mt-0' : 'mt-32')}>
-                      <div className="absolute -inset-10 bg-white/[0.02] rounded-[3rem] blur-3xl group-focus-within/search:bg-white/[0.05] transition-all duration-1000 pointer-events-none" />
-                      <div className="space-y-6">
-                        <div className="flex flex-col gap-4">
-                          <div className="relative group/input">
-                            <Search className="absolute left-6 top-1/2 -translate-y-1/2 size-5 text-white/20 group-focus-within/search:text-white/60 group-hover/input:text-white/40 transition-all duration-500" />
-                            <Input
-                              value={searchQuery}
-                              onChange={e => handleSearchInputChange(e.target.value)}
-                              onKeyDown={e => e.key === 'Enter' && handleSearch()}
-                              placeholder="Search global motion picture database..."
-                              className="h-16 pl-16 pr-8 rounded-[1.5rem] bg-white/[0.02] border-white/[0.05] focus:bg-white/[0.04] focus:border-white/20 text-lg font-bold placeholder:text-white/10 transition-all duration-500 shadow-elevation-1 focus:shadow-glow-sm"
-                            />
-                            {isSearching && <div className="absolute right-6 top-1/2 -translate-y-1/2"><Loader2 className="size-6 animate-spin text-white/40" /></div>}
-                          </div>
-                          <Button onClick={() => handleSearch()} disabled={isSearching || !searchQuery.trim()} className="h-16 px-12 rounded-[1.5rem] bg-white text-black hover:bg-white/90 font-black uppercase tracking-[0.25em] text-[11px] shadow-glow-sm active:scale-95 transition-all duration-500 w-full">
-                            Search
-                          </Button>
+        <main className="flex-1 w-full min-h-0 relative overflow-hidden flex justify-center">
+          <div className="w-full max-w-[1400px] h-full min-h-0 overflow-hidden px-6 md:px-10 pb-10">
+            <AnimatePresence mode="wait">
+              {activeTab === 'discover' ? (
+                <m.div
+                  key="discover"
+                  initial={{ opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -8 }}
+                  transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
+                  className="h-full flex flex-col min-h-0"
+                >
+                  <DiscoverTab
+                    searchQuery={searchQuery}
+                    onSearchInputChange={handleSearchInputChange}
+                    onSearch={handleSearch}
+                    isSearching={isSearching}
+                    results={filteredResults}
+                    allResults={searchResults}
+                    mediaFilter={mediaFilter}
+                    setMediaFilter={setMediaFilter}
+                    trending={trendingRich}
+                    onOpenTrending={openTrendingDetails}
+                    onOpenResult={(id, type) => {
+                      setSelectedResult({ id, type })
+                      setDetailsModalOpen(true)
+                    }}
+                  />
+                </m.div>
+              ) : activeTab === 'reminders' ? (
+                <m.div
+                  key="reminders"
+                  initial={{ opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -8 }}
+                  transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
+                  className="h-full min-h-0"
+                >
+                  <RemindersList
+                    reminders={reminders}
+                    onEdit={(r) => {
+                      setEditingReminder(r)
+                      setEditorOpen(true)
+                    }}
+                    onRefresh={loadReminders}
+                  />
+                </m.div>
+              ) : (
+                <m.div
+                  key="watchlist"
+                  initial={{ opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -8 }}
+                  transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
+                  className="h-full min-h-0"
+                >
+                  <WatchlistList
+                    items={watchlistItems}
+                    onEdit={(item) => {
+                      setEditingWatchlistItem(item)
+                      setWatchlistEditorOpen(true)
+                    }}
+                    onRefresh={loadWatchlist}
+                  />
+                </m.div>
+              )}
+            </AnimatePresence>
+          </div>
+        </main>
+
+        {selectedResult && (
+          <TmdbDetailsModal
+            key={`${selectedResult.type}-${selectedResult.id}`}
+            open={detailsModalOpen}
+            onOpenChange={handleDetailsOpenChange}
+            tmdbId={selectedResult.id}
+            mediaType={selectedResult.type}
+            onSetReminder={(data) => {
+              handleDetailsOpenChange(false)
+              handleSetReminderFromSearch(data)
+            }}
+            onAddToWatchlist={(data) => {
+              handleDetailsOpenChange(false)
+              handleAddToWatchlist(data)
+            }}
+          />
+        )}
+
+        <ReminderEditor open={editorOpen} onOpenChange={setEditorOpen} initialData={editingReminder || undefined} onSave={handleSaveReminder} />
+        <WatchlistEditor open={watchlistEditorOpen} onOpenChange={setWatchlistEditorOpen} initialData={editingWatchlistItem || undefined} onSave={handleSaveWatchlist} />
+      </div>
+    </LazyMotion>
+  )
+}
+
+// ─── discover subtab ────────────────────────────────────
+function DiscoverTab(props: {
+  searchQuery: string
+  onSearchInputChange: (v: string) => void
+  onSearch: (override?: string) => void
+  isSearching: boolean
+  results: TmdbSearchResult[]
+  allResults: TmdbSearchResult[]
+  mediaFilter: 'all' | 'movie' | 'tv'
+  setMediaFilter: (m: 'all' | 'movie' | 'tv') => void
+  trending: TrendingRich[]
+  onOpenTrending: (item: TrendingRich) => void
+  onOpenResult: (id: number, type: 'movie' | 'tv') => void
+}) {
+  const showingResults = props.allResults.length > 0
+
+  const heroItem = props.trending[0]
+  const heroPoster = heroItem?.poster_path ? getTmdbImageUrl(heroItem.poster_path, 'w500') : null
+  const heroBackdrop = heroItem?.backdrop_path ? getTmdbImageUrl(heroItem.backdrop_path, 'w500') : null
+  const heroYear = heroItem?.release_date
+    ? new Date(heroItem.release_date).getFullYear()
+    : null
+
+  return (
+    <div className="h-full flex flex-col min-h-0">
+      {/* search row */}
+      <div className="shrink-0 flex items-center gap-3 pb-5">
+        <div className="relative flex-1 max-w-2xl group/search">
+          <Search className="absolute left-4 top-1/2 -translate-y-1/2 size-4 text-white/35 transition-colors group-focus-within/search:text-white" />
+          <Input
+            value={props.searchQuery}
+            onChange={e => props.onSearchInputChange(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && props.onSearch()}
+            placeholder="Search TMDB…"
+            className="h-11 pl-11 pr-24 rounded-lg bg-white/[0.025] border border-white/[0.08] focus:bg-white/[0.05] focus:border-white/30 focus:shadow-[0_0_0_3px_rgba(255,255,255,0.04)] text-[13px] placeholder:text-white/30 transition-all duration-200"
+          />
+          {/* keyboard hint */}
+          <div className="absolute right-3 top-1/2 -translate-y-1/2 hidden sm:flex items-center gap-1">
+            <kbd className="rounded border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest text-white/45">
+              Enter
+            </kbd>
+          </div>
+          {props.isSearching && (
+            <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 size-4 animate-spin text-white/40 sm:hidden" />
+          )}
+        </div>
+        <Button
+          type="button"
+          onClick={() => props.onSearch()}
+          disabled={props.isSearching || !props.searchQuery.trim()}
+          className="h-11 px-5 rounded-lg bg-white text-black text-[12px] font-bold uppercase tracking-[0.12em] hover:bg-white/90 hover:shadow-[0_0_20px_-3px_rgba(255,255,255,0.3)] disabled:opacity-30 disabled:shadow-none transition-all duration-200"
+        >
+          Search
+        </Button>
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+        <AnimatePresence mode="wait">
+          {!showingResults ? (
+            <m.div
+              key="idle"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.3, ease: 'easeOut' }}
+              className="space-y-8"
+            >
+              {/* hero feature card */}
+              {heroItem && (
+                <button
+                  type="button"
+                  onClick={() => props.onOpenTrending(heroItem)}
+                  className="group/hero relative block w-full overflow-hidden rounded-xl border border-white/[0.06] bg-[hsl(0_0%_5%)] text-left transition-colors hover:border-white/[0.15]"
+                >
+                  {heroBackdrop && (
+                    <div
+                      className="absolute inset-0 opacity-40 transition-opacity duration-700 group-hover/hero:opacity-50"
+                      style={{ backgroundImage: `url(${heroBackdrop})`, backgroundSize: 'cover', backgroundPosition: 'center' }}
+                    />
+                  )}
+                  <div className="absolute inset-0 bg-gradient-to-r from-[hsl(0_0%_4%)] via-[hsl(0_0%_4%)/0.7] to-[hsl(0_0%_4%)/0]" />
+                  <div className="absolute inset-0 bg-gradient-to-t from-[hsl(0_0%_4%)] via-transparent to-transparent" />
+
+                  <div className="relative grid grid-cols-1 sm:grid-cols-[200px_1fr_auto] gap-6 p-6 md:p-7 items-center min-h-[220px]">
+                    <div className="relative w-[160px] aspect-[2/3] overflow-hidden rounded-md border border-white/10 shadow-elevation-2">
+                      {heroPoster ? (
+                        <img
+                          src={heroPoster}
+                          alt={heroItem.title}
+                          className="h-full w-full object-cover transition-transform duration-700 group-hover/hero:scale-[1.02]"
+                          loading="lazy"
+                        />
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center text-white/10">
+                          {heroItem.media_type === 'movie' ? <Film className="size-10" /> : <Tv className="size-10" />}
                         </div>
-
-                        {!searchResults.length && trendingSuggestions.length > 0 && (
-                          <div className="flex items-center justify-center gap-4 px-6 opacity-40 animate-fade-in-up">
-                            <span className="text-[10px] font-black uppercase tracking-widest">Trending:</span>
-                            <div className="flex flex-wrap justify-center gap-x-4 gap-y-2">
-                              {trendingSuggestions.map(item => (
-                                <button type="button" key={`${item.media_type}-${item.id}`} onClick={() => openTrendingDetails(item)} className="text-[10px] font-bold hover:text-white transition-colors hover:underline underline-offset-4 decoration-white/20">
-                                  {item.title}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </div>
+                      )}
                     </div>
 
-                    {searchResults.length > 0 ? (
-                      <div className="w-full space-y-10 animate-fade-in-up">
-                        <div className="flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between px-2">
-                          <div className="flex items-center gap-4">
-                            <div className="size-10 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center shadow-inner">
-                              <TrendingUp className="size-5 text-white/60" />
-                            </div>
-                            <div className="flex flex-col">
-                              <h2 className="text-sm font-black uppercase tracking-[0.2em] text-white/80 leading-none">Discovery System</h2>
-                              <span className="text-[10px] font-bold text-white/20 uppercase tracking-widest mt-1.5">{filteredResults.length} records identified</span>
-                            </div>
-                          </div>
-
-                          <div className="flex w-fit items-center gap-1.5 rounded-2xl p-1.5 bg-white/[0.03] border border-white/[0.05] backdrop-blur-md">
-                            {[
-                              { id: 'all', label: 'All' },
-                              { id: 'movie', label: 'Movies' },
-                              { id: 'tv', label: 'Series' }
-                            ].map(tab => (
-                              <button type="button" key={tab.id} onClick={() => setMediaFilter(tab.id as 'all' | 'movie' | 'tv')} className={cn('px-5 py-2 rounded-xl text-[9px] font-black uppercase tracking-[0.2em] transition-all duration-500', mediaFilter === tab.id ? 'bg-white text-black shadow-glow-sm' : 'text-white/30 hover:text-white/60 hover:bg-white/5')}>
-                                {tab.label}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-8 gap-y-12">
-                          {filteredResults.map((result, idx) => (
-                            <m.div key={`${result.media_type}-${result.id}`} initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} transition={{ delay: idx * 0.05, duration: 0.5 }} className="group">
-                              <button type="button" className="relative isolate cursor-pointer text-left w-full" onClick={() => {
-                                setSelectedResult({ id: result.id, type: result.media_type as 'movie' | 'tv' })
-                                setDetailsModalOpen(true)
-                              }} aria-label={`View details for ${result.title || result.name}`}>
-                                <div className="relative overflow-hidden rounded-[2rem] border border-white/[0.06] bg-white/[0.02] shadow-elevation-1 transition-all duration-500 group-hover:border-white/15 group-hover:shadow-elevation-2">
-                                  {result.poster_path ? (
-                                    <img src={getTmdbImageUrl(result.poster_path, 'w500') || ''} alt={result.title || result.name} className="aspect-[2/3] w-full object-cover transition-transform duration-700 group-hover:scale-[1.03]" />
-                                  ) : (
-                                    <div className="aspect-[2/3] w-full flex items-center justify-center bg-white/[0.02] text-white/5">
-                                      {result.media_type === 'movie' ? <Film className="size-16" /> : <Tv className="size-16" />}
-                                    </div>
-                                  )}
-                                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/70 via-black/10 to-transparent opacity-80 transition-opacity duration-500 group-hover:opacity-100" />
-
-                                  <div className="absolute top-4 left-4 z-20">
-                                    <div className="h-7 px-3 flex items-center gap-2 rounded-full border border-white/10 bg-black/35 backdrop-blur-xl">
-                                      {result.media_type === 'movie' ? <Film className="size-3 opacity-60" /> : <Tv className="size-3 opacity-60" />}
-                                      <span className="text-[8px] font-black uppercase tracking-widest">{result.media_type}</span>
-                                    </div>
-                                  </div>
-
-                                </div>
-                              </button>
-
-                              <div className="mt-5 px-1 space-y-1.5 text-center">
-                                <h3 className="font-black text-white text-sm line-clamp-1 tracking-tight">
-                                  {result.title || result.name}
-                                </h3>
-                                <div className="flex items-center justify-center gap-3 text-[9px] text-white/20 font-black uppercase tracking-[0.15em]">
-                                  <span>
-                                    {result.release_date ? new Date(result.release_date).getFullYear() :
-                                      result.first_air_date ? new Date(result.first_air_date).getFullYear() : 'TBA'}
-                                  </span>
-                                  {(result.vote_average ?? 0) > 0 && (
-                                    <>
-                                      <div className="size-1 rounded-full bg-white/10" />
-                                      <span className="text-white/40">{(result.vote_average ?? 0).toFixed(1)} Score</span>
-                                    </>
-                                  )}
-                                </div>
-                              </div>
-                            </m.div>
-                          ))}
-                        </div>
+                    <div className="min-w-0 space-y-3">
+                      <div className="flex items-center gap-2.5 text-[10px] font-bold uppercase tracking-[0.28em] text-white/45">
+                        <span className="text-white/35">§</span>
+                        <Sparkles className="size-3 text-white/55" />
+                        <span>The Pick</span>
+                        <span aria-hidden className="h-px w-6 bg-white/15" />
+                        <span className="text-white/35">{heroItem.media_type === 'movie' ? 'Film' : 'Series'}</span>
                       </div>
-                    ) : (
-                      !isSearching && !searchQuery && (
-                        <div className="flex flex-1 flex-col items-center justify-center py-20 text-center gap-y-8 w-full">
-                          <p className="text-white/20 font-bold uppercase tracking-[0.2em] text-sm">
-                            Search the TMDB catalog or open a trending title
-                          </p>
-                        </div>
-                      )
-                    )}
+                      <h2 className="text-[28px] md:text-[36px] font-bold tracking-[-0.035em] leading-[0.95] text-white">
+                        {heroItem.title}
+                      </h2>
+                      <div className="flex items-center gap-2.5 text-[12px] text-white/45">
+                        {heroYear && <span className="tabular-nums">{heroYear}</span>}
+                        {heroYear && <span className="text-white/15">·</span>}
+                        <span className="uppercase tracking-[0.18em] text-white/40">
+                          {heroItem.media_type === 'movie' ? 'Film' : 'Series'}
+                        </span>
+                        {(heroItem.vote_average ?? 0) > 0 && (
+                          <>
+                            <span className="text-white/15">·</span>
+                            <span className="tabular-nums">{(heroItem.vote_average ?? 0).toFixed(1)}</span>
+                          </>
+                        )}
+                      </div>
+                      {heroItem.overview && (
+                        <p className="hidden sm:block text-[13px] text-white/50 leading-relaxed line-clamp-2 max-w-lg">
+                          {heroItem.overview}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="flex sm:flex-col items-start sm:items-end gap-2 sm:gap-3 sm:self-center">
+                      <span className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-[0.2em] text-white/60 group-hover/hero:text-white transition-colors">
+                        Open details
+                        <ArrowUpRight className="size-3.5 transition-transform group-hover/hero:translate-x-0.5 group-hover/hero:-translate-y-0.5" />
+                      </span>
+                    </div>
                   </div>
-                </ScrollArea>
-              </m.div>
-            ) : activeTab === 'reminders' ? (
-              <m.div key="reminders" initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -30 }} transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }} className="flex flex-col h-full min-h-0 overflow-hidden px-6 pb-8 items-center">
-                <div className="w-full max-w-4xl flex-1 min-h-0">
-                  <RemindersList reminders={reminders} onEdit={(r) => {
-                    setEditingReminder(r)
-                    setEditorOpen(true)
-                  }} onRefresh={loadReminders} />
-                </div>
-              </m.div>
-            ) : (
-              <m.div key="watchlist" initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -30 }} transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }} className="flex flex-col h-full min-h-0 overflow-hidden px-6 pb-8 items-center">
-                <div className="w-full max-w-4xl flex-1 min-h-0">
-                  <WatchlistList items={watchlistItems} onEdit={(item) => {
-                    setEditingWatchlistItem(item)
-                    setWatchlistEditorOpen(true)
-                  }} onRefresh={loadWatchlist} />
-                </div>
-              </m.div>
-            )}
-          </AnimatePresence>
-        </div>
-      </main>
+                </button>
+              )}
 
-      {selectedResult && (
-        <TmdbDetailsModal
-          key={`${selectedResult.type}-${selectedResult.id}`}
-          open={detailsModalOpen}
-          onOpenChange={handleDetailsOpenChange}
-          tmdbId={selectedResult.id}
-          mediaType={selectedResult.type}
-          onSetReminder={(data) => {
-            handleDetailsOpenChange(false)
-            handleSetReminderFromSearch(data)
-          }}
-          onAddToWatchlist={(data) => {
-            handleDetailsOpenChange(false)
-            handleAddToWatchlist(data)
-          }}
-        />
-      )}
+              {/* trending row */}
+              {props.trending.length > 1 && (
+                <section>
+                  <div className="mb-5 flex items-end justify-between gap-4 border-b border-white/[0.06] pb-3">
+                    <div className="flex items-end gap-3">
+                      <span className="text-[9px] font-bold uppercase tracking-[0.32em] text-white/35">
+                        §
+                      </span>
+                      <h2 className="text-[14px] font-bold uppercase tracking-[0.18em] text-white/85">
+                        Trending today
+                      </h2>
+                      <span aria-hidden className="mb-1 h-px w-8 bg-white/15" />
+                      <span className="text-[10px] font-medium uppercase tracking-[0.22em] text-white/35 pb-0.5">
+                        Editor's selection
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 text-[10px] tabular-nums text-white/40">
+                      <span className="size-1 rounded-full bg-emerald-400/80 shadow-[0_0_4px_rgba(52,211,153,0.6)]" />
+                      <span className="uppercase tracking-[0.18em]">Live</span>
+                      <span className="text-white/55">{props.trending.length} titles</span>
+                    </div>
+                  </div>
+                  <ul className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-x-5 gap-y-6">
+                    {props.trending.slice(1).map((item, idx) => (
+                      <TrendingTile
+                        key={`${item.media_type}-${item.id}`}
+                        item={item}
+                        index={idx}
+                        onOpen={() => props.onOpenTrending(item)}
+                      />
+                    ))}
+                  </ul>
+                </section>
+              )}
 
-      <ReminderEditor open={editorOpen} onOpenChange={setEditorOpen} initialData={editingReminder || undefined} onSave={handleSaveReminder} />
-      <WatchlistEditor open={watchlistEditorOpen} onOpenChange={setWatchlistEditorOpen} initialData={editingWatchlistItem || undefined} onSave={handleSaveWatchlist} />
+              {!props.isSearching && !props.searchQuery && props.trending.length === 0 && (
+                <div className="flex flex-col items-center justify-center text-center py-20">
+                  <p className="text-[13px] text-white/35">
+                    Search the catalog or open a trending title.
+                  </p>
+                </div>
+              )}
+            </m.div>
+          ) : (
+            <m.div
+              key="results"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.3, ease: 'easeOut' }}
+              className="space-y-5"
+            >
+              <div className="flex items-center justify-between">
+                <p className="text-[11px] text-white/40 tabular-nums">
+                  {props.results.length} {props.results.length === 1 ? 'result' : 'results'} for &ldquo;{props.searchQuery}&rdquo;
+                </p>
+                <div className="flex items-center rounded-md border border-white/[0.06] bg-white/[0.015] p-0.5">
+                  {([
+                    { id: 'all', label: 'All' },
+                    { id: 'movie', label: 'Movies' },
+                    { id: 'tv', label: 'Series' },
+                  ] as { id: 'all' | 'movie' | 'tv'; label: string }[]).map(opt => (
+                    <button
+                      type="button"
+                      key={opt.id}
+                      onClick={() => props.setMediaFilter(opt.id)}
+                      className={cn(
+                        'px-2.5 py-1 rounded-[5px] text-[11px] font-medium transition-colors duration-150',
+                        props.mediaFilter === opt.id
+                          ? 'bg-white/[0.08] text-white'
+                          : 'text-white/35 hover:text-white/70',
+                      )}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {props.results.length === 0 ? (
+                <p className="text-center text-[12px] text-white/35 py-12">No matches for this filter.</p>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-x-6 gap-y-8">
+                  {props.results.map((r, i) => (
+                    <DiscoverResult
+                      key={`${r.media_type}-${r.id}`}
+                      result={r}
+                      index={i}
+                      onOpen={() => props.onOpenResult(r.id, r.media_type as 'movie' | 'tv')}
+                    />
+                  ))}
+                </div>
+              )}
+            </m.div>
+          )}
+        </AnimatePresence>
+      </div>
     </div>
-    </LazyMotion>
+  )
+}
+
+function TrendingTile({ item, index, onOpen }: { item: TrendingRich; index?: number; onOpen: () => void }) {
+  const posterUrl = item.poster_path ? getTmdbImageUrl(item.poster_path, 'w185') : null
+  const year = item.release_date ? new Date(item.release_date).getFullYear() : null
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="group text-left w-full"
+      aria-label={`Open ${item.title}`}
+    >
+      <div className="relative aspect-[2/3] overflow-hidden rounded-md bg-[hsl(0_0%_5%)] border border-white/[0.05] transition-colors duration-150 group-hover:border-white/20">
+        {posterUrl ? (
+          <img
+            src={posterUrl}
+            alt={item.title}
+            loading="lazy"
+            className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.02]"
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-white/10">
+            {item.media_type === 'movie' ? <Film className="size-8" /> : <Tv className="size-8" />}
+          </div>
+        )}
+        {/* editorial rank chip — top-left */}
+        {index !== undefined && (
+          <div className="absolute top-2 left-2 inline-flex items-center gap-1 rounded-md bg-black/70 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.18em] text-white/80 backdrop-blur-sm">
+            <span className="tabular-nums text-white">{String(index + 1).padStart(2, '0')}</span>
+          </div>
+        )}
+      </div>
+      <div className="mt-2 space-y-0.5">
+        <p className="text-[12px] font-medium text-white/80 line-clamp-1 leading-tight">
+          {item.title}
+        </p>
+        {year !== null && (
+          <p className="text-[10px] tabular-nums text-white/30">
+            {year}
+            {(item.vote_average ?? 0) > 0 && (
+              <>
+                <span className="mx-1.5 text-white/15">·</span>
+                <span>{(item.vote_average ?? 0).toFixed(1)}</span>
+              </>
+            )}
+          </p>
+        )}
+      </div>
+    </button>
+  )
+}
+
+function DiscoverResult({ result, index, onOpen }: { result: TmdbSearchResult; index: number; onOpen: () => void }) {
+  const posterUrl = result.poster_path ? getTmdbImageUrl(result.poster_path, 'w300') : null
+  return (
+    <m.button
+      type="button"
+      onClick={onOpen}
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4, delay: Math.min(index * 0.025, 0.4), ease: [0.22, 1, 0.36, 1] }}
+      className="group text-left w-full"
+      aria-label={`View details for ${result.title || result.name}`}
+    >
+      <div className="relative aspect-[2/3] overflow-hidden rounded-md bg-[hsl(0_0%_5%)] border border-white/[0.05] transition-colors duration-150 group-hover:border-white/20">
+        {posterUrl ? (
+          <img
+            src={posterUrl}
+            alt={result.title || result.name || ''}
+            loading="lazy"
+            className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.02]"
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-white/10">
+            {result.media_type === 'movie'
+              ? <Film className="size-8" />
+              : <Tv className="size-8" />
+            }
+          </div>
+        )}
+      </div>
+      <div className="mt-2.5 space-y-0.5">
+        <p className="text-[13px] font-medium leading-tight tracking-tight text-white/85 line-clamp-1">
+          {result.title || result.name}
+        </p>
+        <p className="text-[11px] tabular-nums text-white/30 line-clamp-1">
+          {result.release_date
+            ? new Date(result.release_date).getFullYear()
+            : result.first_air_date
+              ? new Date(result.first_air_date).getFullYear()
+              : 'TBA'}
+          {(result.vote_average ?? 0) > 0 && (
+            <>
+              <span className="mx-1.5 text-white/15">·</span>
+              <span>{(result.vote_average ?? 0).toFixed(1)}</span>
+            </>
+          )}
+        </p>
+      </div>
+    </m.button>
   )
 }

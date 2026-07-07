@@ -232,26 +232,30 @@ pub fn process_movie(
     let mut director: Option<String> = None;
     let mut poster_path: Option<String> = None;
     let mut tmdb_id: Option<String> = None;
+    let mut imdb_id: Option<String> = None;
     let mut tmdb_runtime_seconds: Option<f64> = None;
 
-    // Fetch TMDB metadata
-    if !api_key.is_empty() {
-        if let Ok(Some(metadata)) = tmdb::search_metadata(
-            api_key,
-            &parsed.title,
-            "movie",
-            parsed.year,
-            image_cache_dir,
-        ) {
-            title = prefer_title_with_leading_article(&parsed.title, &metadata.title);
-            year = metadata.year;
-            overview = metadata.overview;
-            cast_names = metadata.cast_names;
-            director = metadata.director;
-            poster_path = metadata.poster_path;
-            tmdb_id = metadata.tmdb_id;
-            tmdb_runtime_seconds = metadata.runtime_seconds;
-        }
+    if let Ok(Some(metadata)) = tmdb::search_metadata_with_fallback(
+        api_key,
+        &parsed.title,
+        "movie",
+        parsed.year,
+        image_cache_dir,
+    ) {
+        title = prefer_title_with_leading_article(&parsed.title, &metadata.title);
+        year = metadata.year;
+        overview = metadata.overview;
+        cast_names = metadata.cast_names;
+        director = metadata.director;
+        poster_path = metadata.poster_path;
+        tmdb_id = metadata.tmdb_id;
+        imdb_id = metadata.imdb_id;
+        tmdb_runtime_seconds = metadata.runtime_seconds;
+    } else if api_key.trim().is_empty() {
+        println!(
+            "[IMDBAPI] No api_key configured; indexer skipped metadata for \"{}\"",
+            parsed.title
+        );
     }
 
     let effective_duration = if duration > 0.0 {
@@ -271,7 +275,26 @@ pub fn process_movie(
         effective_duration,
         tmdb_id.as_deref(),
     ) {
-        Ok(_) => println!("Indexed Movie: {}", title),
+        Ok(new_id) => {
+            println!("Indexed Movie: {}", title);
+            if let Some(ref iid) = imdb_id {
+                let metadata = tmdb::TmdbMetadata {
+                    title: title.clone(),
+                    year,
+                    overview: overview.clone(),
+                    cast_names: cast_names.clone(),
+                    director: director.clone(),
+                    poster_path: poster_path.clone(),
+                    tmdb_id: tmdb_id.clone(),
+                    imdb_id: Some(iid.clone()),
+                    runtime_seconds: tmdb_runtime_seconds,
+                    imdb_image_url: None,
+                };
+                if let Err(e) = db.update_metadata(new_id, &metadata) {
+                    println!("[IMDBAPI] Failed to persist imdb_id for {}: {}", title, e);
+                }
+            }
+        }
         Err(e) => println!("Error indexing movie {}: {}", title, e),
     }
 }
@@ -347,29 +370,28 @@ pub fn process_tv_episode(
         let mut tmdb_id: Option<String> = None;
         let mut imdb_id: Option<String> = None;
 
-        if !api_key.is_empty() {
-            if let Ok(Some(metadata)) =
-                tmdb::search_metadata(api_key, &parsed.title, "tv", parsed.year, image_cache_dir)
-            {
-                title = prefer_title_with_leading_article(&parsed.title, &metadata.title);
-                year = metadata.year;
-                overview = metadata.overview;
-                cast_names = metadata.cast_names;
-                tmdb_id = metadata.tmdb_id;
-                imdb_id = metadata.imdb_id;
+        if let Ok(Some(metadata)) = tmdb::search_metadata_with_fallback(
+            api_key,
+            &parsed.title,
+            "tv",
+            parsed.year,
+            image_cache_dir,
+        ) {
+            title = prefer_title_with_leading_article(&parsed.title, &metadata.title);
+            year = metadata.year;
+            overview = metadata.overview;
+            cast_names = metadata.cast_names;
+            tmdb_id = metadata.tmdb_id;
+            imdb_id = metadata.imdb_id;
 
-                // Use organized image caching for series poster
-                if let Some(ref poster) = metadata.poster_path {
-                    // Extract the TMDB path from the cached path if it exists
-                    // or cache with organized structure
-                    poster_path = Some(poster.clone());
-                }
-
-                println!(
-                    "[TMDB] Series metadata for \"{}\": poster={:?}, imdb_id={:?}",
-                    title, poster_path, imdb_id
-                );
+            if let Some(ref poster) = metadata.poster_path {
+                poster_path = Some(poster.clone());
             }
+
+            println!(
+                "[TMDB] Series metadata for \"{}\": poster={:?}, imdb_id={:?}",
+                title, poster_path, imdb_id
+            );
         }
 
         (

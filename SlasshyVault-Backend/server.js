@@ -186,7 +186,7 @@ app.post('/auth/refresh', async (req, res) => {
     const tokens = await tokenResponse.json();
     if (tokens.error) return res.status(400).json({ error: tokens.error });
 
-    res.json({ access_token: tokens.access_token, expires_in: tokens.expires_in, token_type: tokens.token_type });
+    res.json({ access_token: tokens.access_token, expires_in: tokens.expires_in, token_type: tokens.token_type, refresh_token: tokens.refresh_token });
   } catch (err) {
     console.error('Refresh error:', err);
     res.status(500).json({ error: 'refresh_failed' });

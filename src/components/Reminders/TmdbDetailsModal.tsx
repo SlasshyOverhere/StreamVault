@@ -26,6 +26,7 @@ interface TmdbDetailsModalProps {
   onOpenChange: (open: boolean) => void
   tmdbId: number
   mediaType: 'movie' | 'tv'
+  imdbId?: string | null
   onSetReminder: (data: {
     tmdbId: string,
     mediaType: 'movie' | 'tv',
@@ -51,6 +52,7 @@ export function TmdbDetailsModal({
   onOpenChange,
   tmdbId,
   mediaType,
+  imdbId,
   onSetReminder,
   onAddToWatchlist
 }: TmdbDetailsModalProps) {
@@ -75,10 +77,10 @@ export function TmdbDetailsModal({
       setLoading(true)
       try {
         if (mediaType === 'movie') {
-          const data = await getMovieDetails(tmdbId)
+          const data = await getMovieDetails(tmdbId, imdbId ?? null)
           setMovieDetails(data)
         } else {
-          const data = await getTvDetails(tmdbId)
+          const data = await getTvDetails(tmdbId, imdbId ?? null)
           setTvDetails(data)
           if (data && data.seasons.length > 0) {
             const preferredSeasonNumber =
@@ -89,7 +91,11 @@ export function TmdbDetailsModal({
 
             setLoadingSeason(true)
             try {
-              const seasonData = await getTvSeasonEpisodes(tmdbId, preferredSeasonNumber)
+              const seasonData = await getTvSeasonEpisodes(
+                tmdbId,
+                preferredSeasonNumber,
+                imdbId ?? null,
+              )
               setSeasonDetails(seasonData)
             } catch (error) {
               console.error('Failed to load season details:', error)

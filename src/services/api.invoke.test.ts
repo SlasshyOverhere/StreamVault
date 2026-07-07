@@ -146,9 +146,9 @@ describe('service wrappers: specific defaults on error', async () => {
     expect(result.heatmap).toEqual([])
   })
 
-  it('searchContent returns [] on error', async () => {
+  it('searchContent throws on error', async () => {
     mockInvoke.mockRejectedValueOnce(new Error('fail'))
-    expect(await mod.searchContent('query')).toEqual([])
+    await expect(mod.searchContent('query')).rejects.toThrow('fail')
   })
 
   it('getTmdbReviews returns [] on error', async () => {

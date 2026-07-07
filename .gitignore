@@ -111,4 +111,10 @@ FRONTEND_REMINDER_*.md
 # Vendor docs (not source)
 src-tauri/vendor/rar-stream/*.md
 
+# AI/orchestration extras
+.impeccable/
+.omo/
+.planning/
+docs/superpowers/
+
 # Bundled MPV tracked via Git LFS

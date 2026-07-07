@@ -39,6 +39,29 @@ export const isGDriveConnected = async (): Promise<boolean> => {
   }
 };
 
+export interface GDriveAuthStatus {
+  has_refresh_token: boolean;
+  has_access_token: boolean;
+  last_refresh_error?: string | null;
+  last_refresh_failed_at?: string | null;
+  consecutive_failures?: number;
+}
+
+/**
+ * Lightweight snapshot of the backend OAuth state — distinguishes
+ * "refresh lost but library readable" from "fully logged out."
+ * Returns null if the backend command itself fails (e.g. Tauri runtime
+ * unavailable). Callers should treat null as "keep current UI state."
+ */
+export const getGDriveAuthStatus = async (): Promise<GDriveAuthStatus | null> => {
+  try {
+    return await invoke<GDriveAuthStatus>("gdrive_get_auth_status");
+  } catch (error) {
+    console.warn("[GDrive] gdrive_get_auth_status failed", error);
+    return null;
+  }
+};
+
 /**
  * Get current Google Drive access token.
  * Tauri backend refreshes automatically when needed.
