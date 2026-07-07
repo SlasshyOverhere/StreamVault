@@ -1550,8 +1550,12 @@ function App() {
 
       // Always scan the entire Google Drive (root recursively covers everything)
       const gdrive = await import('@/services/gdrive')
-      await gdrive.addCloudFolder('root', 'My Drive')
-      const result = await gdrive.scanCloudFolder('root', 'My Drive')
+      // Both calls mutate Drive state (folder tracking + index write).
+      // Soft_lost guard prompts re-auth before letting either run.
+      const result = await guardDriveWrite(async () => {
+        await gdrive.addCloudFolder('root', 'My Drive')
+        return gdrive.scanCloudFolder('root', 'My Drive')
+      })
 
       if (result.indexed_count > 0) {
         setCloudIndexingStatus(`✓ Added ${result.indexed_count} new files!`)
