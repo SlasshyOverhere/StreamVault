@@ -6,7 +6,7 @@ import {
   Link2, Plus, Trash2, RefreshCw,
   AlertCircle, CheckCircle, Loader2, Archive,
   Sparkles,
-  HardDrive, ChevronDown, Globe, CornerDownLeft
+  HardDrive, ChevronDown, Globe, CornerDownLeft, FileArchive
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -127,6 +127,59 @@ function parseArchiveUrl(raw: string): { host: string | null; filename: string |
   }
 }
 
+interface ParsedError {
+  status: string | null
+  statusText: string | null
+  uri: string | null
+  raw: string
+}
+
+function parseIndexError(raw: string): ParsedError {
+  // Match patterns like: HTTP status client error (403 Forbidden) for uri (https://...)
+  const statusMatch = raw.match(/\((\d{3})(?:\s+([A-Za-z][\w\s]*?))?\)/)
+  const uriMatch = raw.match(/for uri\s+\(([^)]+)\)/i) ?? raw.match(/(https?:\/\/[^\s)]+)/i)
+  return {
+    status: statusMatch?.[1] ?? null,
+    statusText: statusMatch?.[2]?.trim() ?? null,
+    uri: uriMatch?.[1] ?? null,
+    raw,
+  }
+}
+
+function errorRecoveryHint(parsed: ParsedError): string {
+  if (!parsed.status) return "Check the URL, then try again."
+  const code = Number(parsed.status)
+  if (code === 401 || code === 403) {
+    return "The link is private or expired. Get a fresh URL from the host and try again."
+  }
+  if (code === 404) {
+    return "The file is no longer at this address. Check the URL or find a new source."
+  }
+  if (code === 408 || code === 504 || code === 524) {
+    return "The host didn't respond in time. Try again, or pick a faster mirror."
+  }
+  if (code >= 500) {
+    return "The host is having trouble. Wait a moment, then try again."
+  }
+  if (code >= 400) {
+    return "The host rejected the request. Verify the URL is correct and still valid."
+  }
+  return "Check the URL, then try again."
+}
+
+function shortenUriForDisplay(uri: string, maxLen: number = 64): string {
+  try {
+    const u = new URL(uri)
+    const last = u.pathname.split("/").filter(Boolean).pop() ?? ""
+    const base = `${u.host}/…/${last}`
+    if (base.length <= maxLen) return base
+    return base.slice(0, maxLen - 1) + "…"
+  } catch {
+    if (uri.length <= maxLen) return uri
+    return uri.slice(0, maxLen - 1) + "…"
+  }
+}
+
 interface DirectLinksViewProps {
   onIndexComplete?: (payload: { mediaIds: number[]; contentName: string }) => void | Promise<void>
   viewMode?: "grid" | "list"
@@ -172,7 +225,7 @@ export default function DirectLinksView({
     addProgress?.stage === "probing-archive" ||
     addProgress?.stage === "fetching-show-metadata"
   )
-  const progressPercent = progressTotal > 0 ? Math.max(4, Math.min(100, (progressCurrent / progressTotal) * 100)) : 4
+  const progressPercent = progressTotal > 0 ? Math.min(100, (progressCurrent / progressTotal) * 100) : 0
   const progressContext = formatSeasonEpisode(addProgress?.season, addProgress?.episode)
   const progressDots = addStep === "indexing" ? ".".repeat((indexingTick % 4)) : ""
   const progressMessage = addProgress?.message
@@ -702,55 +755,97 @@ export default function DirectLinksView({
                   animate={{ opacity: 1, scale: 1 }}
                   className="space-y-3 w-full min-w-0"
                 >
-                  <div className="flex items-center gap-3 p-3 rounded-lg bg-muted/50 border border-border min-w-0">
-                    <div className="size-8 rounded-lg bg-amber-500/10 flex-shrink-0 flex items-center justify-center">
-                      <CheckCircle className="size-4 text-amber-400" />
+                  {/* File context — anchor for the whole panel. Single row, no duplication. */}
+                  <div className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-muted/50 border border-border min-w-0">
+                    <div className="size-7 rounded-md bg-amber-500/10 flex items-center justify-center shrink-0">
+                      <FileArchive className="size-3.5 text-amber-400" />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-foreground truncate">{addValidation.filename}</p>
-                      <p className="text-xs text-muted-foreground">{formatFileSize(addValidation.fileSize)}</p>
+                      <p className="text-sm font-medium text-foreground truncate" title={addValidation.filename}>
+                        {(() => { const f = prettifyFilename(addValidation.filename); return <>{f.display}<span className="text-muted-foreground/60">{f.extension}</span></> })()}
+                      </p>
                     </div>
+                    <span className="text-[11px] font-medium text-muted-foreground tabular-nums shrink-0">
+                      {formatFileSize(addValidation.fileSize)}
+                    </span>
                   </div>
 
+                  {/* Progress panel */}
                   <div className="rounded-lg bg-muted/30 border border-border p-4 space-y-3 min-w-0 overflow-hidden">
-                    <div className="flex items-start justify-between gap-4 min-w-0">
-                      <div className="space-y-1 flex-1 min-w-0">
-                        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{progressLabel}</p>
-                        <p className="text-sm font-medium text-foreground truncate">{progressMessage}</p>
-                        {progressContext && <p className="text-xs text-muted-foreground truncate">{progressContext}</p>}
-                        {addProgress?.filename && <p className="text-xs text-muted-foreground truncate">{addProgress.filename}</p>}
-                      </div>
-                      <div className="text-right shrink-0">
-                        <p className="text-lg font-semibold text-foreground">{Math.round(progressPercent)}%</p>
-                        <p className="text-xs text-muted-foreground">{progressCurrent} / {progressTotal || 1}</p>
+                    {/* Stage + live message */}
+                    <div className="flex items-start gap-2.5 min-w-0">
+                      <div className="size-1.5 rounded-full bg-foreground mt-1.5 shrink-0 animate-pulse" aria-hidden />
+                      <div className="flex-1 min-w-0 space-y-1">
+                        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+                          {progressLabel}
+                        </p>
+                        <AnimatePresence mode="wait">
+                          <m.p
+                            key={progressMessage}
+                            initial={{ opacity: 0, y: 4 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: -4 }}
+                            transition={{ duration: 0.18, ease: "easeOut" }}
+                            className="text-sm font-medium text-foreground leading-snug"
+                          >
+                            {progressMessage}
+                          </m.p>
+                        </AnimatePresence>
+                        {progressContext && (
+                          <p className="text-xs text-muted-foreground">
+                            {progressContext}
+                          </p>
+                        )}
                       </div>
                     </div>
 
-                    <div className="h-1.5 w-full bg-muted rounded-full overflow-hidden">
-                      <m.div
-                        className="h-full rounded-full bg-foreground"
-                        initial={{ width: "0%" }}
-                        animate={isIndeterminateProgress
-                          ? { width: ["18%", "56%", "28%"], x: ["0%", "52%", "0%"] }
-                          : { width: `${progressPercent}%` }}
-                        transition={isIndeterminateProgress
-                          ? { duration: 1.35, repeat: Infinity, ease: "easeInOut" }
-                          : { type: "spring", stiffness: 100, damping: 20 }}
-                      />
+                    {/* Bar + inline percent/ratio — single row, no stacked hero metric */}
+                    <div className="flex items-center gap-3">
+                      <div className="h-1 flex-1 bg-muted rounded-full overflow-hidden">
+                        <m.div
+                          className="h-full rounded-full bg-foreground"
+                          initial={{ width: "0%" }}
+                          animate={isIndeterminateProgress
+                            ? { width: ["18%", "56%", "28%"], x: ["0%", "52%", "0%"] }
+                            : { width: `${progressPercent}%` }}
+                          transition={isIndeterminateProgress
+                            ? { duration: 1.35, repeat: Infinity, ease: "easeInOut" }
+                            : { type: "spring", stiffness: 100, damping: 20 }}
+                        />
+                      </div>
+                      <span className="text-[11px] font-semibold text-foreground tabular-nums shrink-0 min-w-[64px] text-right">
+                        {isIndeterminateProgress ? (
+                          <span className="text-muted-foreground">Working…</span>
+                        ) : progressTotal > 0 ? (
+                          <>{Math.round(progressPercent)}% · {progressCurrent}/{progressTotal}</>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </span>
                     </div>
 
-                    {addProgress?.episodeTitle && (
-                      <m.div
-                        initial={{ opacity: 0, x: -10 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        className="flex items-center gap-2 p-2 rounded-lg bg-muted/50 border border-border min-w-0"
-                      >
-                        <Sparkles className="size-3.5 text-amber-400 flex-shrink-0" />
-                        <span className="text-xs text-muted-foreground truncate">
-                          {addProgress.stage === "fetching-episode-metadata" ? "Metadata:" : "Discovered:"} {addProgress.episodeTitle}
-                        </span>
-                      </m.div>
-                    )}
+                    {/* Episode discovery — only when relevant */}
+                    <AnimatePresence>
+                      {addProgress?.episodeTitle && (
+                        <m.div
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: "auto" }}
+                          exit={{ opacity: 0, height: 0 }}
+                          transition={{ duration: 0.2, ease: "easeOut" }}
+                          className="overflow-hidden"
+                        >
+                          <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-md bg-amber-500/5 border border-amber-500/20 min-w-0">
+                            <Sparkles className="size-3 text-amber-400 flex-shrink-0" />
+                            <span className="text-[11px] text-foreground/80 truncate">
+                              <span className="text-muted-foreground">
+                                {addProgress.stage === "fetching-episode-metadata" ? "Metadata: " : "Discovered: "}
+                              </span>
+                              <span className="font-medium">{addProgress.episodeTitle}</span>
+                            </span>
+                          </div>
+                        </m.div>
+                      )}
+                    </AnimatePresence>
                   </div>
                 </m.div>
               )}
@@ -769,20 +864,48 @@ export default function DirectLinksView({
                 </m.div>
               )}
 
-              {addStep === "error" && (
-                <m.div
-                  key="error"
-                  initial={{ x: 20, opacity: 0 }}
-                  animate={{ x: 0, opacity: 1 }}
-                  className="p-4 bg-destructive/10 border border-destructive/20 rounded-lg flex gap-3 items-start"
-                >
-                  <AlertCircle className="size-5 text-destructive flex-shrink-0 mt-0.5" />
-                  <div>
-                    <p className="text-sm font-medium text-destructive">Index failed</p>
-                    <p className="text-xs text-muted-foreground mt-1">{addError}</p>
-                  </div>
-                </m.div>
-              )}
+              {addStep === "error" && (() => {
+                const parsed = parseIndexError(addError)
+                return (
+                  <m.div
+                    key="error"
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+                    className="rounded-xl border border-destructive/30 bg-destructive/5 overflow-hidden"
+                  >
+                    <div className="flex items-start gap-3 p-4">
+                      <div className="size-8 rounded-lg bg-destructive/15 flex items-center justify-center shrink-0">
+                        <AlertCircle className="size-4 text-destructive" />
+                      </div>
+                      <div className="flex-1 min-w-0 space-y-1.5">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="text-sm font-semibold text-foreground">Index failed</p>
+                          {parsed.status && (
+                            <span className="inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded-md bg-destructive/15 border border-destructive/30 text-[10px] font-bold text-destructive tabular-nums">
+                              {parsed.status}
+                              {parsed.statusText && <span className="font-medium opacity-80">· {parsed.statusText}</span>}
+                            </span>
+                          )}
+                        </div>
+                        {parsed.uri ? (
+                          <p className="text-[11px] text-muted-foreground" title={parsed.uri}>
+                            Couldn't reach <span className="text-foreground font-medium font-mono">{shortenUriForDisplay(parsed.uri, 56)}</span>
+                          </p>
+                        ) : (
+                          <p className="text-[11px] text-muted-foreground line-clamp-2">{parsed.raw}</p>
+                        )}
+                      </div>
+                    </div>
+                    <div className="px-4 py-2.5 border-t border-destructive/15 bg-destructive/[0.03] flex items-start gap-2">
+                      <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider shrink-0 mt-px">Fix</span>
+                      <p className="text-[11px] text-foreground/80 leading-relaxed">
+                        {errorRecoveryHint(parsed)}
+                      </p>
+                    </div>
+                  </m.div>
+                )
+              })()}
             </AnimatePresence>
           </div>
 
