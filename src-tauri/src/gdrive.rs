@@ -106,6 +106,19 @@ impl FailedRefreshRecord {
     }
 }
 
+/// Lightweight snapshot of the auth backend's view of the OAuth session.
+/// Returned to JS so the UI can distinguish "fully signed in" from
+/// "refresh lost but library still loadable."
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GDriveAuthStatus {
+    pub has_refresh_token: bool,
+    pub has_access_token: bool,
+    pub last_refresh_error: Option<String>,
+    pub last_refresh_failed_at: Option<String>, // ISO-8601 UTC
+    pub consecutive_failures: u32,
+}
+
 /// Refresh buffer (seconds) before access-token expiry at which proactive
 /// rotation kicks in. 600s = 10 min, safe over the typical 3600s Drive lifetime.
 pub const TOKEN_REFRESH_BUFFER_SECS: i64 = 600;
@@ -396,6 +409,35 @@ impl GoogleDriveClient {
     /// Returns the new access_token string.
     pub async fn force_refresh(&self) -> Result<String, String> {
         self.refresh_access_token_inner(true).await
+    }
+
+    /// Build a `GDriveAuthStatus` snapshot of the current OAuth session
+    /// without performing any network calls. Safe to call on every UI mount.
+    pub fn get_auth_status(&self) -> GDriveAuthStatus {
+        let (has_refresh_token, has_access_token) = {
+            let guard = self.tokens.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_ref() {
+                Some(t) => (t.refresh_token.is_some(), !t.access_token.is_empty()),
+                None => (false, false),
+            }
+        };
+        let rec = self
+            .failed_refresh
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+
+        GDriveAuthStatus {
+            has_refresh_token,
+            has_access_token,
+            last_refresh_error: rec.last_error,
+            last_refresh_failed_at: rec.last_failed_at.map(|ts| {
+                chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_default()
+            }),
+            consecutive_failures: rec.consecutive_failures,
+        }
     }
 
     /// Spawn a background task that periodically refreshes access tokens
@@ -3896,5 +3938,77 @@ mod tests {
         assert_eq!(rec.last_error, None);
         assert_eq!(rec.last_failed_at, None);
         assert_eq!(rec.consecutive_failures, 0);
+    }
+
+    // ==================== get_auth_status (Task 2: gdrive_get_auth_status) ====================
+
+    #[test]
+    fn get_auth_status_reflects_recorded_failure() {
+        let client = GoogleDriveClient {
+            tokens: Arc::new(Mutex::new(None)),
+            failed_refresh: Arc::new(Mutex::new(FailedRefreshRecord::default())),
+            http_client: reqwest::Client::new(),
+            refresh_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+
+        // Record a permanent failure on the in-memory record.
+        {
+            let mut rec = client.failed_refresh.lock().unwrap();
+            rec.record(&Err("invalid_grant".into()));
+        }
+
+        let status = client.get_auth_status();
+        assert!(!status.has_refresh_token);
+        assert!(!status.has_access_token);
+        assert_eq!(
+            status.last_refresh_error.as_deref(),
+            Some("invalid_grant")
+        );
+        assert_eq!(status.consecutive_failures, 1);
+        assert!(status.last_refresh_failed_at.is_some());
+    }
+
+    #[test]
+    fn get_auth_status_cleared_after_success() {
+        let client = GoogleDriveClient {
+            tokens: Arc::new(Mutex::new(None)),
+            failed_refresh: Arc::new(Mutex::new(FailedRefreshRecord::default())),
+            http_client: reqwest::Client::new(),
+            refresh_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+
+        // First record a failure, then a success — record() should clear.
+        {
+            let mut rec = client.failed_refresh.lock().unwrap();
+            rec.record(&Err("invalid_grant".into()));
+            rec.record(&Ok("new_access_token".into()));
+        }
+
+        let status = client.get_auth_status();
+        assert_eq!(status.last_refresh_error, None);
+        assert_eq!(status.last_refresh_failed_at, None);
+        assert_eq!(status.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn get_auth_status_reports_token_presence() {
+        let tokens = GoogleTokens {
+            access_token: "at".to_string(),
+            refresh_token: Some("rt".to_string()),
+            expires_at: Some(9999999999),
+            token_type: "Bearer".to_string(),
+        };
+        let client = GoogleDriveClient {
+            tokens: Arc::new(Mutex::new(Some(tokens))),
+            failed_refresh: Arc::new(Mutex::new(FailedRefreshRecord::default())),
+            http_client: reqwest::Client::new(),
+            refresh_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+
+        let status = client.get_auth_status();
+        assert!(status.has_refresh_token);
+        assert!(status.has_access_token);
+        assert_eq!(status.last_refresh_error, None);
+        assert_eq!(status.consecutive_failures, 0);
     }
 }

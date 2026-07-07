@@ -630,6 +630,16 @@ async fn gdrive_get_access_token(state: State<'_, AppState>) -> Result<String, S
     state.gdrive_client.get_access_token().await
 }
 
+/// Lightweight snapshot of the OAuth session for the JS auth-state hook.
+/// Returns token presence plus the most-recent permanent refresh failure
+/// so the UI can distinguish fully-signed-in from refresh-lost-but-library-ok.
+#[tauri::command]
+async fn gdrive_get_auth_status(
+    state: State<'_, AppState>,
+) -> Result<gdrive::GDriveAuthStatus, String> {
+    Ok(state.gdrive_client.get_auth_status())
+}
+
 /// Get Google Drive account info
 #[tauri::command]
 async fn gdrive_get_account_info(
@@ -19027,6 +19037,7 @@ fn main() {
             // Google Drive commands
             gdrive_is_connected,
             gdrive_get_access_token,
+            gdrive_get_auth_status,
             gdrive_get_account_info,
             gdrive_start_auth,
             gdrive_complete_auth,
