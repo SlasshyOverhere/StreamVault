@@ -56,6 +56,56 @@ pub struct GoogleTokens {
     pub token_type: String,
 }
 
+/// Records the most recent permanent OAuth refresh failure so the UI can
+/// distinguish "fully logged out" from "refresh lost but local state intact".
+/// Transient network errors are intentionally kept out: they are retried by
+/// the watchdog and would produce false-positive nag banners.
+#[derive(Debug, Clone, Default)]
+pub struct FailedRefreshRecord {
+    pub last_error: Option<String>,
+    pub last_failed_at: Option<i64>, // unix seconds
+    pub consecutive_failures: u32,
+}
+
+/// Patterns that mean "refresh token is permanently dead." A response body
+/// or error message containing any of these tokens (case-insensitive) is
+/// recorded into `FailedRefreshRecord`. Anything else (network errors,
+/// 5xx, timeouts) is treated as transient and only bumps the counter.
+const PERMANENT_REFRESH_ERROR_TOKENS: &[&str] = &[
+    "invalid_grant",
+    "invalid_token",
+    "unauthorized_client",
+];
+
+fn is_permanent_refresh_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    PERMANENT_REFRESH_ERROR_TOKENS
+        .iter()
+        .any(|tok| lower.contains(tok))
+}
+
+impl FailedRefreshRecord {
+    /// Apply the outcome of a refresh attempt.
+    /// `Ok(_)` clears any recorded failure.
+    /// `Err(msg)` only records permanent failures (`is_permanent_refresh_error`).
+    pub fn record(&mut self, outcome: &Result<String, String>) {
+        match outcome {
+            Ok(_) => {
+                self.last_error = None;
+                self.last_failed_at = None;
+                self.consecutive_failures = 0;
+            }
+            Err(msg) => {
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                if is_permanent_refresh_error(msg) {
+                    self.last_error = Some(msg.clone());
+                    self.last_failed_at = Some(chrono::Utc::now().timestamp());
+                }
+            }
+        }
+    }
+}
+
 /// Refresh buffer (seconds) before access-token expiry at which proactive
 /// rotation kicks in. 600s = 10 min, safe over the typical 3600s Drive lifetime.
 pub const TOKEN_REFRESH_BUFFER_SECS: i64 = 600;
@@ -185,6 +235,7 @@ pub struct DriveChange {
 #[derive(Debug, Clone)]
 pub struct GoogleDriveClient {
     tokens: Arc<Mutex<Option<GoogleTokens>>>,
+    failed_refresh: Arc<Mutex<FailedRefreshRecord>>,
     http_client: reqwest::Client,
     refresh_in_flight: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -261,6 +312,7 @@ impl GoogleDriveClient {
             });
         Self {
             tokens: Arc::new(Mutex::new(tokens)),
+            failed_refresh: Arc::new(Mutex::new(FailedRefreshRecord::default())),
             http_client,
             refresh_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
@@ -501,28 +553,43 @@ impl GoogleDriveClient {
         let max_wait = std::time::Duration::from_secs(15);
         let start = std::time::Instant::now();
 
-        loop {
-            // Try to atomically become the single in-flight refresher.
-            if self
-                .refresh_in_flight
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                let result = self.refresh_access_token_inner_lockless(persist).await;
-                self.refresh_in_flight.store(false, Ordering::Release);
-                return result;
-            }
+        // Inner body that produces the final Result<String, String>. Caller
+        // applies `FailedRefreshRecord::record` to whatever we produce so the
+        // `failed_refresh` field stays accurate for the soft-auth UI.
+        let inner = async {
+            loop {
+                // Try to atomically become the single in-flight refresher.
+                if self
+                    .refresh_in_flight
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    let result = self.refresh_access_token_inner_lockless(persist).await;
+                    self.refresh_in_flight.store(false, Ordering::Release);
+                    return result;
+                }
 
-            // Another ref resher holds the right. Spin-wait briefly then
-            // re-check whether the in-memory token has been refreshed for us.
-            if start.elapsed() > max_wait {
-                return Err("Refresh in flight timed out".to_string());
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            if let Ok(fresh) = self.read_fresh_token() {
-                return Ok(fresh);
+                // Another ref resher holds the right. Spin-wait briefly then
+                // re-check whether the in-memory token has been refreshed for us.
+                if start.elapsed() > max_wait {
+                    return Err("Refresh in flight timed out".to_string());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if let Ok(fresh) = self.read_fresh_token() {
+                    return Ok(fresh);
+                }
             }
         }
+        .await;
+
+        {
+            let mut rec = self
+                .failed_refresh
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            rec.record(&inner);
+        }
+        inner
     }
 
     /// Reads the current in-memory access token iff it is still fresh
@@ -2608,6 +2675,7 @@ mod tests {
     fn build_stream_url_format() {
         let client = GoogleDriveClient {
             tokens: Arc::new(Mutex::new(None)),
+            failed_refresh: Arc::new(Mutex::new(FailedRefreshRecord::default())),
             http_client: reqwest::Client::new(),
             refresh_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -2623,6 +2691,7 @@ mod tests {
     fn build_stream_url_special_chars_in_id() {
         let client = GoogleDriveClient {
             tokens: Arc::new(Mutex::new(None)),
+            failed_refresh: Arc::new(Mutex::new(FailedRefreshRecord::default())),
             http_client: reqwest::Client::new(),
             refresh_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -2636,6 +2705,7 @@ mod tests {
     fn is_authenticated_when_no_tokens() {
         let client = GoogleDriveClient {
             tokens: Arc::new(Mutex::new(None)),
+            failed_refresh: Arc::new(Mutex::new(FailedRefreshRecord::default())),
             http_client: reqwest::Client::new(),
             refresh_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -2652,6 +2722,7 @@ mod tests {
         };
         let client = GoogleDriveClient {
             tokens: Arc::new(Mutex::new(Some(tokens))),
+            failed_refresh: Arc::new(Mutex::new(FailedRefreshRecord::default())),
             http_client: reqwest::Client::new(),
             refresh_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -2668,6 +2739,7 @@ mod tests {
         };
         let client = GoogleDriveClient {
             tokens: Arc::new(Mutex::new(None)),
+            failed_refresh: Arc::new(Mutex::new(FailedRefreshRecord::default())),
             http_client: reqwest::Client::new(),
             refresh_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -3794,5 +3866,35 @@ mod tests {
         assert!(json.contains("\"refresh_token\":\"rt-x\""));
         assert!(json.contains("\"expires_at\":42"));
         assert!(json.contains("\"token_type\":\"Bearer\""));
+    }
+
+    // ==================== FailedRefreshRecord classification ====================
+
+    #[test]
+    fn permanent_error_patterns_are_classified() {
+        assert!(is_permanent_refresh_error("invalid_grant"));
+        assert!(is_permanent_refresh_error("returned INVALID_GRANT from server"));
+        assert!(is_permanent_refresh_error("invalid_token"));
+        assert!(!is_permanent_refresh_error("connection reset by peer"));
+        assert!(!is_permanent_refresh_error(""));
+        assert!(!is_permanent_refresh_error("upstream 503"));
+    }
+
+    #[test]
+    fn record_writes_only_for_permanent_failures() {
+        let mut rec = FailedRefreshRecord::default();
+        rec.record(&Err("transient: server returned 502".into()));
+        assert_eq!(rec.last_error, None);
+        assert_eq!(rec.consecutive_failures, 1);
+
+        rec.record(&Err("{\"error\":\"invalid_grant\"}".into()));
+        assert_eq!(rec.last_error.as_deref(), Some("{\"error\":\"invalid_grant\"}"));
+        assert!(rec.last_failed_at.is_some());
+        assert_eq!(rec.consecutive_failures, 2);
+
+        rec.record(&Ok("new_access_token".into()));
+        assert_eq!(rec.last_error, None);
+        assert_eq!(rec.last_failed_at, None);
+        assert_eq!(rec.consecutive_failures, 0);
     }
 }
