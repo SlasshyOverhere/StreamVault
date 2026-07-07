@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseVideoFilename } from './gdrive';
+import { parseVideoFilename, getGDriveAuthStatus } from './gdrive';
 
 // Mock Tauri invoke to avoid issues during import/execution
 vi.mock('@tauri-apps/api/tauri', () => ({
@@ -100,5 +100,11 @@ describe('parseVideoFilename', () => {
                 title: 'My Home Video',
             });
         });
+    });
+});
+
+describe('getGDriveAuthStatus', () => {
+    it('exposes the wrapper function', () => {
+        expect(typeof getGDriveAuthStatus).toBe('function');
     });
 });
