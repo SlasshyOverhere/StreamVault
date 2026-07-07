@@ -121,7 +121,7 @@ export function ReminderEditor({
               mediaType as 'movie' | 'tv',
               seasonNumber,
               episodeNumber,
-              imdbId ?? null,
+              null,
             )
             setSchedule(sched)
             if (sched.title) {

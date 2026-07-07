@@ -11,7 +11,7 @@ import { RemoteCacheStatusBar } from './RemoteCacheStatusBar'
 import { RemoteCleanupDialog } from './RemoteCleanupDialog'
 import { AddonSetupWizard } from './AddonSetupWizard'
 import { Film, Play, X, ArrowLeft, Check, Clock } from 'lucide-react'
-import { listStremioAddons, fetchStremioStreams, type StremioAddon } from '@/services/api'
+import { listStremioAddons, fetchStremioStreams } from '@/services/api'
 import { toRemoteStreamData, type StremioRawStream } from './StremioStreamAdapter'
 import type { TmdbSearchResult, GroupedStreams, RemoteStreamData, CacheStatus } from './remote.types'
 import { getYear } from './remote.types'
@@ -520,7 +520,7 @@ function RemoteSourceViewInner() {
       const addons = await listStremioAddons()
       if (addons.length === 0) return []
 
-      const stremioType = mediaType === 'tv' ? 'series' : mediaType
+      const stremioType = mediaType
       // Stremio stream IDs: movie = tt1234567, series = tt1234567:S1E2
       let stremioId = imdbId
       if (stremioType === 'series' && season != null && episode != null) {

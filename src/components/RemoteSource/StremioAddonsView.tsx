@@ -34,7 +34,6 @@ export function StremioAddonsView({ onPlayStream }: StremioAddonsViewProps) {
   const [resolving, setResolving] = useState(false)
   const [listError, setListError] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
-  const [searching, setSearching] = useState(false)
 
   const refresh = useCallback(async () => {
     setLoading(true)
