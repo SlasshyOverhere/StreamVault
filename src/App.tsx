@@ -81,6 +81,7 @@ import {
 import { useToast } from '@/components/ui/use-toast'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useAuth } from '@/hooks/useAuth'
+import { useAuthGuard, AuthCancelledError } from '@/hooks/useAuthGuard'
 import { sortMediaItems } from '@/utils/sorting'
 import { sortPinnedFirst } from '@/utils/pins'
 import {
@@ -630,6 +631,11 @@ function App() {
   // Authentication state
   const { state, isAuthenticated, isAuthLoading, isLoggingIn, login: handleLogin, logout: handleLogout, reauth: _handleReauth, needsReauth: _needsReauth, showIndexingPrompt, isIndexing, confirmIndexing, declineIndexing } = useAuth()
 
+  // Write-gate: wraps Drive-mutating operations so that, when the refresh
+  // token is soft_lost, the user is prompted to re-authenticate and the
+  // write only runs after re-auth completes. Read-only reads stay ungated.
+  const { guard: guardDriveWrite } = useAuthGuard()
+
   const mergeDownloadJob = useCallback((job: DownloadJob) => {
     setDownloadJobs((current) => {
       const existingIndex = current.findIndex((entry) => entry.id === job.id)
@@ -993,11 +999,20 @@ function App() {
 
   const runWatchHistorySync = useCallback(async () => {
     try {
-      await syncWatchHistory()
+      // syncWatchHistory is the only path that mutates the user's watch
+      // history state on Google Drive. Soft_lost guard prompts a re-auth
+      // modal before letting this run.
+      await guardDriveWrite(() => syncWatchHistory())
     } catch (error) {
+      // AuthCancelledError: user dismissed the re-auth modal — silently skip
+      // the sync (local DB write in callers already succeeded; the Drive
+      // sync will just retry later via runWatchHistorySync()).
+      if (error instanceof AuthCancelledError) {
+        return
+      }
       console.error('[History] Sync failed:', error)
     }
-  }, [])
+  }, [guardDriveWrite])
 
   const handleHomeSearch = useCallback(async () => {
     if (!homeSearchQuery.trim()) {
