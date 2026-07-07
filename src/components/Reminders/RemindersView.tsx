@@ -56,6 +56,25 @@ type TrendingRich = {
   overview: string | null
 }
 
+// ─── header stat block ─────────────────────────────────
+function StatBlock({ label, value, hint }: { label: string; value: number; hint: string }) {
+  return (
+    <div className="px-4 py-2.5 min-w-[88px] transition-colors hover:bg-white/[0.025]">
+      <div className="flex items-baseline gap-1.5">
+        <span className="text-[20px] font-bold tracking-[-0.03em] tabular-nums text-white leading-none">
+          {String(value).padStart(2, '0')}
+        </span>
+        <span className="text-[9px] font-bold uppercase tracking-[0.22em] text-white/45">
+          {label}
+        </span>
+      </div>
+      <div className="mt-1 text-[9px] uppercase tracking-[0.2em] text-white/35">
+        {hint}
+      </div>
+    </div>
+  )
+}
+
 export function RemindersView() {
   const { toast } = useToast()
   const [activeTab, setActiveTab] = useState<Tab>('discover')
@@ -539,25 +558,6 @@ export function RemindersView() {
         <WatchlistEditor open={watchlistEditorOpen} onOpenChange={setWatchlistEditorOpen} initialData={editingWatchlistItem || undefined} onSave={handleSaveWatchlist} />
       </div>
     </LazyMotion>
-  )
-}
-
-// ─── header stat block ─────────────────────────────────
-function StatBlock({ label, value, hint }: { label: string; value: number; hint: string }) {
-  return (
-    <div className="px-4 py-2.5 min-w-[88px] transition-colors hover:bg-white/[0.025]">
-      <div className="flex items-baseline gap-1.5">
-        <span className="text-[20px] font-bold tracking-[-0.03em] tabular-nums text-white leading-none">
-          {String(value).padStart(2, '0')}
-        </span>
-        <span className="text-[9px] font-bold uppercase tracking-[0.22em] text-white/45">
-          {label}
-        </span>
-      </div>
-      <div className="mt-1 text-[9px] uppercase tracking-[0.2em] text-white/35">
-        {hint}
-      </div>
-    </div>
   )
 }
 
