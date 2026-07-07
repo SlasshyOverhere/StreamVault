@@ -76,7 +76,7 @@ import {
   Search, Loader2, Film, Tv,
   ChevronRight, LayoutGrid, List,
   TrendingUp, Sparkles, X, Cloud, RefreshCw, Minus, Download, Bell,
-  Maximize2, Minimize2, Archive, AlertCircle, FolderOpen
+  Archive, AlertCircle, FolderOpen
 } from 'lucide-react'
 import { useToast } from '@/components/ui/use-toast'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -400,10 +400,6 @@ function App() {
           break
         case 'ArrowDown':
           invoke('native_mpv_set_volume', { volume: Math.max(0, nativeVolume - 5) })
-          break
-        case 'f':
-        case 'F':
-          appWindow.toggleMaximize()
           break
         case '=':
         case '+':
@@ -2400,13 +2396,7 @@ function App() {
                     ))}
                   </select>
 
-                  {/* Fullscreen */}
-                  <button
-                    onClick={() => appWindow.toggleMaximize()}
-                    className="pointer-events-auto text-white/70 hover:text-white transition-colors"
-                  >
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
-                  </button>
+                  {/* (Fullscreen button removed — app cannot be maximized/full-screened) */}
                 </div>
               </div>
             </div>
@@ -2419,10 +2409,6 @@ function App() {
               <div className="absolute top-0 left-0 right-0 h-1.5" />
               <div
                 data-tauri-drag-region
-                onDoubleClick={async () => {
-                  await appWindow.toggleMaximize()
-                  await refreshWindowState()
-                }}
                 className="absolute left-0 top-1.5 bottom-0 right-[120px]"
               />
               <div className="flex items-center gap-2 pl-3 select-none">
@@ -2447,19 +2433,6 @@ function App() {
                   aria-label="Minimize window"
                 >
                   <Minus className="mx-auto size-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    await appWindow.toggleMaximize()
-                    await refreshWindowState()
-                  }}
-                  onDoubleClick={(event) => event.stopPropagation()}
-                  className="h-7 w-8 rounded-md border border-transparent text-neutral-400 transition-colors hover:border-white/10 hover:bg-white/10 hover:text-white"
-                  title={isMaximized ? "Restore" : "Maximize"}
-                  aria-label={isMaximized ? "Restore window" : "Maximize window"}
-                >
-                  {isMaximized ? <Minimize2 className="mx-auto size-3.5" /> : <Maximize2 className="mx-auto size-3.5" />}
                 </button>
                 <button
                   type="button"

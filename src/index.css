@@ -58,6 +58,10 @@
     --glow-primary: 0 0% 85%;
     --glow-accent: 0 0% 70%;
     --glow-success: 0 0% 75%;
+
+    /* Auto DPI scaling — set by main.tsx based on window.devicePixelRatio.
+       Preserves the 1395x901 design layout at any monitor size or DPI. */
+    --app-scale: 1;
   }
 }
 
@@ -73,6 +77,12 @@
     width: 100%;
     overflow: hidden;
     background: #000;
+  }
+
+  /* Scale the entire app uniformly to match devicePixelRatio.
+     Set in main.tsx; recomputed on window resize (multi-monitor DPI changes). */
+  #root {
+    zoom: var(--app-scale);
   }
 
   body {
