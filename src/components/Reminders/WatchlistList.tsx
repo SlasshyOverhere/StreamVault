@@ -153,7 +153,7 @@ export function WatchlistList({ items, onEdit, onRefresh, loading = false }: Wat
   return (
     <div className="flex flex-col min-h-0">
       {/* chrome */}
-      <div className="shrink-0 flex items-center justify-between pb-5">
+      <div className="shrink-0 flex items-center justify-between pb-4">
         <div className="flex items-center gap-3">
           <p className="text-[12px] text-white/45 tabular-nums">
             {items.length} {items.length === 1 ? 'title' : 'titles'} saved
@@ -193,6 +193,14 @@ export function WatchlistList({ items, onEdit, onRefresh, loading = false }: Wat
             </button>
           ))}
         </div>
+      </div>
+
+      {/* how it works hint */}
+      <div className="shrink-0 mb-4 flex items-start gap-2.5 rounded-lg border border-white/[0.06] bg-white/[0.015] px-3.5 py-2.5">
+        <span className="mt-[3px] size-1.5 shrink-0 rounded-full bg-white/40" />
+        <p className="text-[11.5px] leading-relaxed text-white/45">
+          <span className="text-white/70 font-medium">Click any saved title</span> to open its details — view the reminder countdown, edit the schedule or notes, or remove it from the queue. Use the arrow keys to step through titles, or press <kbd className="rounded border border-white/10 bg-white/[0.04] px-1 py-px text-[10px] text-white/55">Esc</kbd> to close.
+        </p>
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto pr-1 pb-4">
@@ -341,9 +349,9 @@ function PosterCard({
       animate={{ opacity: 1 }}
       transition={{ delay: index * 0.03, duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
       className={cn(
-        'group/poster relative w-[140px] sm:w-[160px] md:w-[180px] shrink-0 text-left focus:outline-none',
+        'group/poster relative w-[150px] sm:w-[170px] md:w-[200px] shrink-0 text-left focus:outline-none',
       )}
-      aria-label={`Open ${item.title}`}
+      aria-label={`Open ${item.title} details`}
     >
       <div
         className={cn(
@@ -376,6 +384,13 @@ function PosterCard({
             overdue ? 'bg-amber-400/70' : 'bg-white/40',
           )} />
         )}
+
+        {/* hover affordance — subtle "Open" cue so users know titles are clickable */}
+        <div className="pointer-events-none absolute inset-0 flex items-end justify-end p-2 opacity-0 transition-opacity duration-200 group-hover/poster:opacity-100">
+          <span className="inline-flex items-center gap-1 rounded-full bg-black/60 px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.16em] text-white/80 backdrop-blur-sm">
+            Open
+          </span>
+        </div>
       </div>
 
       <div className="mt-2.5 space-y-0.5">

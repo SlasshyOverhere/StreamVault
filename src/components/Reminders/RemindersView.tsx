@@ -303,34 +303,80 @@ export function RemindersView() {
   return (
     <LazyMotion features={domAnimation}>
       <div className="h-full min-h-0 flex flex-col bg-transparent text-white relative overflow-hidden font-sans">
-        <header className="w-full shrink-0 pt-8 pb-5 px-6 md:px-10">
-          <div className="mx-auto max-w-6xl">
-            {/* eyebrow line */}
-            <div className="flex items-center gap-3 text-[10px] font-medium uppercase tracking-[0.32em] text-white/30">
-              <span className="size-1 rounded-full bg-white/40" />
+        <header className="relative w-full shrink-0 overflow-hidden pt-6 pb-5 px-6 md:px-10">
+          {/* atmospheric backdrop — radial spotlight from the title, like a marquee */}
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 opacity-90"
+            style={{
+              background:
+                'radial-gradient(ellipse 60% 100% at 18% 50%, hsl(0 0% 100% / 0.05) 0%, transparent 60%),' +
+                'radial-gradient(ellipse 50% 80% at 85% 20%, hsl(0 0% 100% / 0.025) 0%, transparent 65%)',
+            }}
+          />
+          {/* hairline border for separation */}
+          <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-white/[0.08] to-transparent" />
+
+          <div className="relative mx-auto max-w-[1400px]">
+            {/* eyebrow line — editorial style with date stamp */}
+            <div className="flex items-center gap-4 text-[10px] font-medium uppercase tracking-[0.32em] text-white/35">
+              <span className="inline-flex items-center gap-1.5">
+                <span className="size-1 rounded-full bg-white/50 shadow-[0_0_6px_rgba(255,255,255,0.6)]" />
+                <span className="text-white/55">No. <span className="tabular-nums text-white/75">04</span></span>
+              </span>
+              <span aria-hidden className="h-px w-8 bg-white/15" />
               <span>Catalogue · Reminders · Queue</span>
+              <span aria-hidden className="h-px flex-1 bg-gradient-to-r from-white/10 to-transparent" />
+              <span className="tabular-nums text-white/35">{new Date().toLocaleDateString(undefined, { month: 'short', day: '2-digit', year: 'numeric' }).toUpperCase()}</span>
             </div>
 
             {/* main row — title + stats + notif */}
-            <div className="mt-3 flex items-end justify-between gap-8">
+            <div className="mt-5 flex items-end justify-between gap-8">
               <div className="min-w-0 flex-1">
-                <h1 className="text-[34px] md:text-[42px] font-semibold tracking-[-0.02em] leading-[0.95] text-white">
-                  Watchlist
-                </h1>
-                <p className="mt-2 text-[13px] text-white/45 max-w-md">
+                {/* editorial title — magazine masthead style with vol. number + year + cursor */}
+                <div className="relative">
+                  <div className="flex items-center gap-3 mb-2.5">
+                    <span className="text-[10px] font-bold uppercase tracking-[0.34em] text-white/40">
+                      Vol.
+                    </span>
+                    <span className="tabular-nums text-[10px] font-bold tracking-[0.22em] text-white/75">
+                      {new Date().getFullYear()}
+                    </span>
+                    <span aria-hidden className="h-px flex-1 max-w-[100px] bg-white/15" />
+                    <span className="text-[9px] font-bold uppercase tracking-[0.32em] text-white/40">
+                      Curated
+                    </span>
+                  </div>
+                  <h1 className="text-[40px] md:text-[54px] font-bold tracking-[-0.04em] leading-[0.92] text-white">
+                    Watchlist
+                  </h1>
+                  {/* hairline rule with progressive dot terminator */}
+                  <div className="mt-3.5 flex items-center gap-2">
+                    <span className="h-[2px] w-14 rounded-full bg-white" />
+                    <span className="h-[1px] w-8 bg-white/30" />
+                    <span className="h-[1px] w-4 bg-white/15" />
+                    <span aria-hidden className="ml-1 size-1.5 rounded-full bg-white shadow-[0_0_6px_rgba(255,255,255,0.5)]" />
+                  </div>
+                </div>
+                <p className="mt-4 text-[13px] leading-relaxed text-white/45 max-w-md">
                   Find films and series, schedule a release alert, or quietly save them for the right night.
                 </p>
               </div>
 
-              {/* stat strip */}
-              <div className="hidden md:flex items-stretch divide-x divide-white/[0.06] rounded-lg border border-white/[0.06] bg-white/[0.015]">
-                <Stat label="Saved" value={stats.watchlistCount} hint="Watchlist" />
-                <Stat label="Reminded" value={stats.remindedCount} hint="Active alerts" />
-                <Stat label="Scheduled" value={stats.reminderCount} hint="Releases" />
+              {/* stat strip — clean inline editorial blocks */}
+              <div className="hidden md:flex items-stretch divide-x divide-white/[0.08] rounded-lg border border-white/[0.08] bg-white/[0.02]">
+                <StatBlock label="Saved" value={stats.watchlistCount} hint="Watchlist" />
+                <StatBlock label="Reminded" value={stats.remindedCount} hint="Active alerts" />
+                <StatBlock label="Scheduled" value={stats.reminderCount} hint="Releases" />
               </div>
 
-              <label className="flex items-center gap-2.5 text-[12px] text-white/45 cursor-pointer select-none shrink-0 self-start md:self-end pb-1.5">
-                <span>Notifications</span>
+              <label className="flex items-center gap-3 text-[11px] font-medium uppercase tracking-[0.2em] text-white/55 cursor-pointer select-none shrink-0 self-start md:self-end pb-1 group/notif">
+                <span className="relative">
+                  Notifications
+                  {config?.notifications_enabled && (
+                    <span className="absolute -right-3 -top-0.5 size-1 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]" />
+                  )}
+                </span>
                 <Switch
                   checked={config?.notifications_enabled || false}
                   onCheckedChange={handleToggleNotifications}
@@ -339,9 +385,9 @@ export function RemindersView() {
               </label>
             </div>
 
-            {/* tab row */}
-            <div className="mt-7 flex items-center gap-1 border-b border-white/[0.06]">
-              {TABS.map(tab => {
+            {/* tab row — magazine-issue style with numeral prefix and underline indicator */}
+            <div className="mt-7 flex items-end gap-0">
+              {TABS.map((tab, i) => {
                 const active = activeTab === tab.id
                 const count = tab.id === 'watchlist' ? stats.watchlistCount
                   : tab.id === 'reminders' ? stats.reminderCount
@@ -354,35 +400,55 @@ export function RemindersView() {
                     aria-selected={active}
                     onClick={() => setActiveTab(tab.id)}
                     className={cn(
-                      'group relative -mb-px flex items-center gap-2 px-3 py-2.5 text-[13px] font-medium transition-colors duration-150',
-                      active ? 'text-white' : 'text-white/40 hover:text-white/70',
+                      'group relative -mb-px flex items-center gap-2.5 px-4 py-3 text-[13px] font-semibold transition-all duration-200',
+                      active ? 'text-white' : 'text-white/40 hover:text-white/75',
                     )}
                   >
-                    <tab.icon className="size-3.5" />
-                    <span>{tab.label}</span>
+                    {/* section numeral */}
+                    <span className={cn(
+                      'tabular-nums text-[9px] font-bold tracking-[0.2em] transition-colors duration-200',
+                      active ? 'text-white/70' : 'text-white/25 group-hover:text-white/45',
+                    )}>
+                      {String(i + 1).padStart(2, '0')}
+                    </span>
+                    <tab.icon className={cn('size-3.5 transition-transform duration-300', active && 'scale-110')} />
+                    <span className="tracking-[-0.005em]">{tab.label}</span>
                     {count !== null && count > 0 && (
                       <span className={cn(
-                        'tabular-nums text-[10px] px-1.5 py-0.5 rounded',
-                        active ? 'bg-white/10 text-white/70' : 'bg-white/[0.04] text-white/35',
+                        'tabular-nums text-[10px] font-bold px-1.5 py-0.5 rounded-full transition-colors',
+                        active ? 'bg-white text-black' : 'bg-white/[0.06] text-white/50 group-hover:bg-white/10',
                       )}>
                         {count}
                       </span>
                     )}
                     {active && (
-                      <span
-                        aria-hidden
-                        className="absolute inset-x-0 -bottom-px h-[2px] bg-white"
-                      />
+                      <>
+                        {/* bold underline indicator */}
+                        <span
+                          aria-hidden
+                          className="absolute inset-x-3 -bottom-px h-[2px] bg-white"
+                        />
+                        {/* small dot terminal at end of underline */}
+                        <span
+                          aria-hidden
+                          className="absolute -bottom-[3px] right-3 size-[6px] rounded-full bg-white shadow-[0_0_8px_rgba(255,255,255,0.6)]"
+                        />
+                      </>
                     )}
                   </button>
                 )
               })}
+              {/* right-side meta */}
+              <div className="ml-auto hidden lg:flex items-center gap-3 pb-3 text-[10px] font-medium uppercase tracking-[0.28em] text-white/30">
+                <span>Edition</span>
+                <span className="tabular-nums text-white/60">2025</span>
+              </div>
             </div>
           </div>
         </header>
 
         <main className="flex-1 w-full min-h-0 relative overflow-hidden flex justify-center">
-          <div className="w-full max-w-6xl h-full min-h-0 overflow-hidden px-6 md:px-10 pb-10">
+          <div className="w-full max-w-[1400px] h-full min-h-0 overflow-hidden px-6 md:px-10 pb-10">
             <AnimatePresence mode="wait">
               {activeTab === 'discover' ? (
                 <m.div
@@ -477,14 +543,20 @@ export function RemindersView() {
 }
 
 // ─── header stat block ─────────────────────────────────
-function Stat({ label, value, hint }: { label: string; value: number; hint: string }) {
+function StatBlock({ label, value, hint }: { label: string; value: number; hint: string }) {
   return (
-    <div className="px-5 py-2.5 min-w-[88px]">
+    <div className="px-4 py-2.5 min-w-[88px] transition-colors hover:bg-white/[0.025]">
       <div className="flex items-baseline gap-1.5">
-        <span className="text-[20px] font-semibold tracking-[-0.02em] tabular-nums text-white">{value}</span>
-        <span className="text-[10px] uppercase tracking-[0.18em] text-white/30">{label}</span>
+        <span className="text-[20px] font-bold tracking-[-0.03em] tabular-nums text-white leading-none">
+          {String(value).padStart(2, '0')}
+        </span>
+        <span className="text-[9px] font-bold uppercase tracking-[0.22em] text-white/45">
+          {label}
+        </span>
       </div>
-      <div className="text-[10px] text-white/25 mt-0.5">{hint}</div>
+      <div className="mt-1 text-[9px] uppercase tracking-[0.2em] text-white/35">
+        {hint}
+      </div>
     </div>
   )
 }
@@ -515,25 +587,31 @@ function DiscoverTab(props: {
   return (
     <div className="h-full flex flex-col min-h-0">
       {/* search row */}
-      <div className="shrink-0 flex items-center gap-2 pb-5">
+      <div className="shrink-0 flex items-center gap-3 pb-5">
         <div className="relative flex-1 max-w-2xl group/search">
-          <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 size-4 text-white/30 transition-colors group-focus-within/search:text-white/60" />
+          <Search className="absolute left-4 top-1/2 -translate-y-1/2 size-4 text-white/35 transition-colors group-focus-within/search:text-white" />
           <Input
             value={props.searchQuery}
             onChange={e => props.onSearchInputChange(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && props.onSearch()}
             placeholder="Search TMDB…"
-            className="h-10 pl-10 pr-3 rounded-md bg-white/[0.02] border-white/[0.06] focus:bg-white/[0.04] focus:border-white/20 text-[13px] placeholder:text-white/25 transition-colors"
+            className="h-11 pl-11 pr-24 rounded-lg bg-white/[0.025] border border-white/[0.08] focus:bg-white/[0.05] focus:border-white/30 focus:shadow-[0_0_0_3px_rgba(255,255,255,0.04)] text-[13px] placeholder:text-white/30 transition-all duration-200"
           />
+          {/* keyboard hint */}
+          <div className="absolute right-3 top-1/2 -translate-y-1/2 hidden sm:flex items-center gap-1">
+            <kbd className="rounded border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest text-white/45">
+              Enter
+            </kbd>
+          </div>
           {props.isSearching && (
-            <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 size-4 animate-spin text-white/40" />
+            <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 size-4 animate-spin text-white/40 sm:hidden" />
           )}
         </div>
         <Button
           type="button"
           onClick={() => props.onSearch()}
           disabled={props.isSearching || !props.searchQuery.trim()}
-          className="h-10 px-4 rounded-md bg-white text-black text-[12px] font-medium hover:bg-white/90 disabled:opacity-40"
+          className="h-11 px-5 rounded-lg bg-white text-black text-[12px] font-bold uppercase tracking-[0.12em] hover:bg-white/90 hover:shadow-[0_0_20px_-3px_rgba(255,255,255,0.3)] disabled:opacity-30 disabled:shadow-none transition-all duration-200"
         >
           Search
         </Button>
@@ -566,8 +644,8 @@ function DiscoverTab(props: {
                   <div className="absolute inset-0 bg-gradient-to-r from-[hsl(0_0%_4%)] via-[hsl(0_0%_4%)/0.7] to-[hsl(0_0%_4%)/0]" />
                   <div className="absolute inset-0 bg-gradient-to-t from-[hsl(0_0%_4%)] via-transparent to-transparent" />
 
-                  <div className="relative grid grid-cols-1 sm:grid-cols-[180px_1fr_auto] gap-6 p-6 md:p-7 items-center min-h-[260px]">
-                    <div className="relative w-[140px] aspect-[2/3] overflow-hidden rounded-md border border-white/10 shadow-elevation-2">
+                  <div className="relative grid grid-cols-1 sm:grid-cols-[200px_1fr_auto] gap-6 p-6 md:p-7 items-center min-h-[220px]">
+                    <div className="relative w-[160px] aspect-[2/3] overflow-hidden rounded-md border border-white/10 shadow-elevation-2">
                       {heroPoster ? (
                         <img
                           src={heroPoster}
@@ -583,11 +661,14 @@ function DiscoverTab(props: {
                     </div>
 
                     <div className="min-w-0 space-y-3">
-                      <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.24em] text-white/40">
-                        <Sparkles className="size-3 text-white/40" />
-                        <span>Featured today</span>
+                      <div className="flex items-center gap-2.5 text-[10px] font-bold uppercase tracking-[0.28em] text-white/45">
+                        <span className="text-white/35">§</span>
+                        <Sparkles className="size-3 text-white/55" />
+                        <span>The Pick</span>
+                        <span aria-hidden className="h-px w-6 bg-white/15" />
+                        <span className="text-white/35">{heroItem.media_type === 'movie' ? 'Film' : 'Series'}</span>
                       </div>
-                      <h2 className="text-[24px] md:text-[28px] font-semibold tracking-[-0.02em] leading-[1.1] text-white">
+                      <h2 className="text-[28px] md:text-[36px] font-bold tracking-[-0.035em] leading-[0.95] text-white">
                         {heroItem.title}
                       </h2>
                       <div className="flex items-center gap-2.5 text-[12px] text-white/45">
@@ -623,17 +704,31 @@ function DiscoverTab(props: {
               {/* trending row */}
               {props.trending.length > 1 && (
                 <section>
-                  <div className="mb-3 flex items-baseline justify-between">
-                    <h2 className="text-[11px] font-medium uppercase tracking-[0.18em] text-white/40">
-                      Trending today
-                    </h2>
-                    <span className="text-[10px] tabular-nums text-white/20">{props.trending.length} titles</span>
+                  <div className="mb-5 flex items-end justify-between gap-4 border-b border-white/[0.06] pb-3">
+                    <div className="flex items-end gap-3">
+                      <span className="text-[9px] font-bold uppercase tracking-[0.32em] text-white/35">
+                        §
+                      </span>
+                      <h2 className="text-[14px] font-bold uppercase tracking-[0.18em] text-white/85">
+                        Trending today
+                      </h2>
+                      <span aria-hidden className="mb-1 h-px w-8 bg-white/15" />
+                      <span className="text-[10px] font-medium uppercase tracking-[0.22em] text-white/35 pb-0.5">
+                        Editor's selection
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 text-[10px] tabular-nums text-white/40">
+                      <span className="size-1 rounded-full bg-emerald-400/80 shadow-[0_0_4px_rgba(52,211,153,0.6)]" />
+                      <span className="uppercase tracking-[0.18em]">Live</span>
+                      <span className="text-white/55">{props.trending.length} titles</span>
+                    </div>
                   </div>
-                  <ul className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-x-5 gap-y-6">
-                    {props.trending.slice(1).map(item => (
+                  <ul className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-x-5 gap-y-6">
+                    {props.trending.slice(1).map((item, idx) => (
                       <TrendingTile
                         key={`${item.media_type}-${item.id}`}
                         item={item}
+                        index={idx}
                         onOpen={() => props.onOpenTrending(item)}
                       />
                     ))}
@@ -688,7 +783,7 @@ function DiscoverTab(props: {
               {props.results.length === 0 ? (
                 <p className="text-center text-[12px] text-white/35 py-12">No matches for this filter.</p>
               ) : (
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-x-6 gap-y-8">
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-x-6 gap-y-8">
                   {props.results.map((r, i) => (
                     <DiscoverResult
                       key={`${r.media_type}-${r.id}`}
@@ -707,7 +802,7 @@ function DiscoverTab(props: {
   )
 }
 
-function TrendingTile({ item, onOpen }: { item: TrendingRich; onOpen: () => void }) {
+function TrendingTile({ item, index, onOpen }: { item: TrendingRich; index?: number; onOpen: () => void }) {
   const posterUrl = item.poster_path ? getTmdbImageUrl(item.poster_path, 'w185') : null
   const year = item.release_date ? new Date(item.release_date).getFullYear() : null
   return (
@@ -728,6 +823,12 @@ function TrendingTile({ item, onOpen }: { item: TrendingRich; onOpen: () => void
         ) : (
           <div className="flex h-full w-full items-center justify-center text-white/10">
             {item.media_type === 'movie' ? <Film className="size-8" /> : <Tv className="size-8" />}
+          </div>
+        )}
+        {/* editorial rank chip — top-left */}
+        {index !== undefined && (
+          <div className="absolute top-2 left-2 inline-flex items-center gap-1 rounded-md bg-black/70 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.18em] text-white/80 backdrop-blur-sm">
+            <span className="tabular-nums text-white">{String(index + 1).padStart(2, '0')}</span>
           </div>
         )}
       </div>

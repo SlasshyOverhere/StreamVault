@@ -108,10 +108,15 @@ export function RemindersList({
 
   return (
     <LazyMotion features={domAnimation}>
-    <div className="grid h-full min-h-0 grid-rows-[minmax(0,170px)_minmax(0,1fr)] gap-4 overflow-hidden">
-      <div className="shrink-0 overflow-hidden">
-        {upcoming.length > 0 && <NextUpPanel reminder={upcoming[0]} />}
-      </div>
+    <div className={cn(
+      "grid h-full min-h-0 gap-4 overflow-hidden",
+      upcoming.length > 0 ? "grid-rows-[minmax(0,200px)_minmax(0,1fr)]" : "grid-rows-[minmax(0,1fr)]"
+    )}>
+      {upcoming.length > 0 && (
+        <div className="shrink-0 overflow-hidden">
+          <NextUpPanel reminder={upcoming[0]} />
+        </div>
+      )}
 
       <section className="flex min-h-0 flex-col gap-6 overflow-hidden p-1">
         <div className="flex shrink-0 items-center justify-between gap-4 px-1">
@@ -157,9 +162,9 @@ export function RemindersList({
                 </AnimatePresence>
               </m.div>
             ) : (
-              <div className="grid content-start grid-cols-1 gap-4 opacity-60 grayscale-[0.3] xl:grid-cols-2">
+              <div className="grid content-start grid-cols-1 gap-4 xl:grid-cols-2">
                 {past.map((reminder) => (
-                  <ReminderCard 
+                  <ReminderCard
                     key={reminder.id}
                     reminder={reminder}
                     onEdit={() => onEdit(reminder)}
@@ -262,7 +267,7 @@ function ReminderCard({
       layout
       className={cn(
         "group relative min-h-[118px] overflow-hidden rounded-[1.5rem] p-4 transition-all duration-300 hover:bg-white/[0.03]",
-        !reminder.is_active && "opacity-40 grayscale-[0.5]"
+        !reminder.is_active && "opacity-55 grayscale-[0.2]"
       )}
     >
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-white/[0.025] via-transparent to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100" />
