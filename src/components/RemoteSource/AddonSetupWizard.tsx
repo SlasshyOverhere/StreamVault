@@ -2,10 +2,13 @@ import { useState, useCallback, useId, type DragEvent, type ChangeEvent, type Ke
 import { open } from '@tauri-apps/api/dialog'
 import { invoke } from '@tauri-apps/api/tauri'
 import { Loader2, UploadCloud, Link2, ArrowRight, AlertTriangle, RotateCcw, X as XIcon, Film } from 'lucide-react'
+import { StremioAddonSetupCard } from './StremioAddonSetupCard'
+import type { StremioAddon } from '@/services/api'
 
 interface AddonSetupWizardProps {
   onInstalled: (info: { url: string; version?: string | null }) => void
   onSaved: (url: string) => void
+  onStremioInstalled?: (addon: StremioAddon) => void
   onError: (message: string) => void
   crashed: boolean
   onRetryRestart: () => Promise<void> | void
@@ -53,6 +56,7 @@ function FilmReelMark({ size = 28 }: { size?: number }) {
 export function AddonSetupWizard({
   onInstalled,
   onSaved,
+  onStremioInstalled,
   onError,
   crashed,
   onRetryRestart,
@@ -217,12 +221,19 @@ export function AddonSetupWizard({
             <li>
               <span className="sv-rail-bullet">02</span>
               <div>
-                <p className="sv-rail-list-title">Paste a URL</p>
-                <p className="sv-rail-list-sub">Or point at a self-hosted addon endpoint.</p>
+                <p className="sv-rail-list-title">Paste a local server URL</p>
+                <p className="sv-rail-list-sub">Or point at a SlasshyVault-compatible addon server.</p>
               </div>
             </li>
             <li>
               <span className="sv-rail-bullet">03</span>
+              <div>
+                <p className="sv-rail-list-title">Add a Stremio addon</p>
+                <p className="sv-rail-list-sub">Paste any Stremio manifest link and we'll connect it.</p>
+              </div>
+            </li>
+            <li>
+              <span className="sv-rail-bullet">04</span>
               <div>
                 <p className="sv-rail-list-title">Start watching</p>
                 <p className="sv-rail-list-sub">Search, queue, and resume from one place.</p>
@@ -323,8 +334,8 @@ export function AddonSetupWizard({
           <div className="sv-field" data-step="02">
             <div className="sv-field-head">
               <span className="sv-field-tag">02 · Connect</span>
-              <h2 className="sv-field-title">Paste an addon URL</h2>
-              <p className="sv-field-sub">Self-hosted or shared by a friend. We only call the root endpoint.</p>
+              <h2 className="sv-field-title">Paste a local server URL</h2>
+              <p className="sv-field-sub">Point at a SlasshyVault-compatible addon server already running on this machine or your network.</p>
             </div>
 
             <div className="sv-url" data-state={urlState}>
@@ -379,6 +390,14 @@ export function AddonSetupWizard({
               <ArrowRight className="sv-save-arrow size-3.5" />
             </button>
           </div>
+
+          {/* ── Stremio row ── */}
+          <StremioAddonSetupCard
+            onInstalled={(addon) => {
+              onStremioInstalled?.(addon)
+            }}
+            onError={onError}
+          />
         </section>
       </div>
     </div>

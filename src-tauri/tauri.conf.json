@@ -123,7 +123,6 @@
         "maximizable": false,
         "minWidth": 900,
         "minHeight": 600,
-        "transparent": true,
         "decorations": false
       }
     ]

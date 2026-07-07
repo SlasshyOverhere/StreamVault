@@ -1,0 +1,12 @@
+{
+  "id": "fake.addon",
+  "version": "1.0.0",
+  "name": "Fake",
+  "description": "A test addon",
+  "types": ["movie"],
+  "resources": ["stream"],
+  "idPrefixes": ["tt"],
+  "catalogs": [
+    { "type": "movie", "id": "top", "name": "Top" }
+  ]
+}

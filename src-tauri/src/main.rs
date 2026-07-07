@@ -24,6 +24,7 @@ mod zip_parser;
 mod zip_stream_proxy;
 mod remote_stream_proxy;
 mod remote_source;
+mod stremio;
 
 mod stream_cache;
 
@@ -11313,7 +11314,6 @@ fn create_main_window(app: &AppHandle) -> Result<tauri::Window, tauri::Error> {
         .title(runtime_window_title())
         .inner_size(1200.0, 800.0)
         .resizable(true)
-        .transparent(true)
         .decorations(false)
         .build()?;
 
@@ -19148,6 +19148,19 @@ fn main() {
             cf_relay::cf_deploy_relay,
             cf_relay::cf_delete_relay,
             cf_relay::cf_relay_status,
+            // Stremio addon commands
+            stremio::stremio_add_addon,
+            stremio::stremio_remove_addon,
+            stremio::stremio_list_addons,
+            stremio::stremio_fetch_catalog,
+            stremio::stremio_fetch_meta,
+            stremio::stremio_fetch_streams,
+            stremio::stremio_resolve_stream,
+            // Debrid service commands
+            stremio::debrid_add_service,
+            stremio::debrid_remove_service,
+            stremio::debrid_list_services,
+            stremio::debrid_set_default,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

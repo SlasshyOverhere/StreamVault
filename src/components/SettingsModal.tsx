@@ -65,6 +65,7 @@ import { GoogleDriveSettings } from "@/components/GoogleDriveSettings";
 import { ZipGuideModal } from "@/components/ZipGuideModal";
 import { SelectiveDeleteModal } from "@/components/SelectiveDeleteModal";
 import { BetaConfirmDialog } from "@/components/BetaConfirmDialog";
+import { DebridServicesPanel } from "@/components/DebridServicesPanel";
 
 interface SettingsModalProps {
   open: boolean;
@@ -1969,6 +1970,9 @@ export function SettingsModal({
 
                       {/* Addon Sources Manager */}
                       <AddonSourcesManager />
+
+                      {/* Debrid Services */}
+                      <DebridServicesPanel />
 
                       {/* Legacy single URL (collapsed) */}
                       <details className="group">
