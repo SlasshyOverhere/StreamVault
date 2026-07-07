@@ -4,6 +4,7 @@ require('dotenv').config();
 
 const app = express();
 app.disable('x-powered-by');
+app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
 const OAUTH_CALLBACK_BASE = process.env.OAUTH_CALLBACK_URL || 'http://localhost:8085/callback';
