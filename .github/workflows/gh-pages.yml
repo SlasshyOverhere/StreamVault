@@ -2,7 +2,7 @@ name: Deploy docs to GitHub Pages
 
 on:
   push:
-    branches: [SlasshyOverhere/update-3.0.59]
+    branches: [SlasshyOverhere/update-3.0.60]
     paths: [docs-vitepress/**]
 
 permissions:
