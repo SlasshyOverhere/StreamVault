@@ -13,6 +13,7 @@ import {
   MarkCompleteDialog,
   WatchTogetherBanner,
   LoginScreen,
+  ReauthBanner,
   ContentDetailsModal,
   ZipPlaybackLoadingOverlay,
   NotificationCenter,
@@ -627,7 +628,7 @@ function App() {
   const [ddlExpiredRefreshing, setDdlExpiredRefreshing] = useState(false)
 
   // Authentication state
-  const { isAuthenticated, isAuthLoading, isLoggingIn, login: handleLogin, logout: handleLogout, showIndexingPrompt, isIndexing, confirmIndexing, declineIndexing } = useAuth()
+  const { state, isAuthenticated, isAuthLoading, isLoggingIn, login: handleLogin, logout: handleLogout, reauth: _handleReauth, needsReauth: _needsReauth, showIndexingPrompt, isIndexing, confirmIndexing, declineIndexing } = useAuth()
 
   const mergeDownloadJob = useCallback((job: DownloadJob) => {
     setDownloadJobs((current) => {
@@ -2224,9 +2225,10 @@ function App() {
         </div>
       )}
       {/* Show login screen if not authenticated */}
-      {!isAuthenticated && !isAuthLoading && (
+      {state === 'unauthenticated' && !isAuthLoading && (
         <LoginScreen onLogin={handleLogin} isLoading={isLoggingIn} />
       )}
+      <ReauthBanner />
 
       {/* Show loading state while checking auth */}
       {isAuthLoading && (
