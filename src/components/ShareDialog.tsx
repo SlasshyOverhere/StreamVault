@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { useToast } from "@/components/ui/use-toast"
 import { shareGDriveFile } from "@/services/gdrive"
+import { useAuthGuard, AuthCancelledError } from "@/hooks/useAuthGuard"
 import { Mail, Send, CheckCircle2, Loader2, Shield } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -19,6 +20,8 @@ export const ShareDialog = ({ open, onOpenChange, fileId, fileName }: ShareDialo
   const [isSharing, setIsSharing] = useState(false)
   const [shared, setShared] = useState(false)
   const { toast } = useToast()
+  // Soft_lost guard: re-auth prompt before letting the share write hit Drive.
+  const { guard: guardDriveWrite } = useAuthGuard()
 
   const handleShare = async () => {
     const trimmedEmail = email.trim()
@@ -33,13 +36,18 @@ export const ShareDialog = ({ open, onOpenChange, fileId, fileName }: ShareDialo
 
     setIsSharing(true)
     try {
-      await shareGDriveFile(fileId, trimmedEmail, "reader")
+      await guardDriveWrite(() => shareGDriveFile(fileId, trimmedEmail, "reader"))
       setShared(true)
       toast({
         title: "Shared successfully",
         description: `"${fileName}" has been shared with ${trimmedEmail}.`,
       })
     } catch (error) {
+      // AuthCancelledError: user dismissed the re-auth modal — no toast,
+      // just leave the dialog open so they can retry sharing.
+      if (error instanceof AuthCancelledError) {
+        return
+      }
       console.error('[ShareDialog] Failed to share:', error)
       toast({
         title: "Failed to share",
