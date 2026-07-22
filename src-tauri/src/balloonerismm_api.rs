@@ -261,6 +261,32 @@ pub struct ImageEntry {
     pub width: Option<i32>,
 }
 
+impl ImagesResponse {
+    /// Pick the highest-resolution poster (backdrop if no poster), preferring
+    /// the largest image by absolute pixel area. Used by `tmdb.rs` to fetch a
+    /// full https:// URL to feed into `cache_imdb_image`.
+    pub fn pick_best_poster_url(self) -> Option<String> {
+        let pick_best = |entries: Vec<ImageEntry>| -> Option<String> {
+            entries
+                .into_iter()
+                .filter_map(|e| {
+                    let url = e.file_path?;
+                    let area = e
+                        .width
+                        .unwrap_or(0)
+                        .saturating_mul(e.height.unwrap_or(0));
+                    Some((url, area))
+                })
+                .max_by_key(|(_, area)| *area)
+                .map(|(url, _)| url)
+        };
+        if let Some(url) = pick_best(self.posters.unwrap_or_default()) {
+            return Some(url);
+        }
+        pick_best(self.backdrops.unwrap_or_default())
+    }
+}
+
 // ── Tiny shared types ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
