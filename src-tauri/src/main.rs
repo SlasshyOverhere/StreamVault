@@ -13,6 +13,7 @@ mod log_buffer;
 mod media_manager;
 mod mpv_ipc;
 mod cf_relay;
+mod balloonerismm_api;
 mod cinemeta_api;
 mod imdb_api;
 mod tmdb;
@@ -14745,7 +14746,7 @@ mod validate_addon_url_tests {
 
     #[test]
     fn accepts_valid_http_url() {
-        assert!(validate_addon_url("http://localhost:3000/addon").is_ok());
+        assert!(validate_addon_url("http://localhost:3255/addon").is_ok());
     }
 
     #[test]
@@ -17750,7 +17751,7 @@ fn toggle_addon_source(
 /// Auto-detect a running addon server on common ports via TCP connect.
 #[tauri::command]
 async fn auto_setup_addon() -> Result<Option<config::AddonSource>, String> {
-    let ports = [51546, 3000, 8080, 12345, 4000, 5000, 7000, 9000];
+    let ports = [51546, 3255, 8080, 12345, 4000, 5000, 7000, 9000];
 
     for port in &ports {
         let addr = format!("127.0.0.1:{}", port);
