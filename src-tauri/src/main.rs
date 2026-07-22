@@ -7767,8 +7767,8 @@ async fn get_movie_details(
                 if let Ok(meta) = cinemeta_api::get_title(cinemeta_api::CinemetaKind::Movie, tt) {
                     return Ok(cinemeta_to_movie_details(&meta));
                 }
-                if let Ok(meta) = imdb_api::get_title(tt) {
-                    return Ok(imdb_to_movie_details(&meta));
+                if let Ok(meta) = balloonerismm_api::get_movie(tt) {
+                    return Ok(balloonerism_to_movie_details(&meta));
                 }
             }
             Err("[IMDB] no api_key and no IMDb id — cannot fetch details".into())
@@ -7931,8 +7931,8 @@ fn cinemeta_to_movie_details(t: &cinemeta_api::CinemetaTitle) -> MovieDetails {
     }
 }
 
-fn imdb_to_movie_details(t: &imdb_api::ImdbTitle) -> MovieDetails {
-    let runtime = t.runtime_seconds.filter(|s| *s > 0).map(|s| s / 60);
+fn balloonerism_to_movie_details(t: &balloonerismm_api::MovieDetail) -> MovieDetails {
+    let runtime = t.runtime.filter(|m| *m > 0);
     MovieDetails {
         id: t.id
             .trim_start_matches("tt")
@@ -7942,25 +7942,19 @@ fn imdb_to_movie_details(t: &imdb_api::ImdbTitle) -> MovieDetails {
             .parse::<i64>()
             .unwrap_or(0),
         title: t
-            .primary_title
+            .title
             .clone()
             .or_else(|| t.original_title.clone())
             .unwrap_or_else(|| "Unknown".to_string()),
-        poster_path: t.primary_image.as_ref().and_then(|i| i.url.clone()),
+        // Poster (and backdrop) come from a separate /images call. Both are
+        // already absolute Amazon CDN URLs so we use them directly.
+        poster_path: None, // populated by the routes that need it via `cache_imdb_image`
         backdrop_path: None,
-        overview: t.plot.clone(),
-        release_date: t.release_date.as_ref().and_then(|d| match (d.year, d.month, d.day) {
-            (Some(y), Some(m), Some(dd)) => Some(format!("{:04}-{:02}-{:02}", y, m, dd)),
-            (Some(y), Some(m), None) => Some(format!("{:04}-{:02}", y, m)),
-            (Some(y), None, _) => Some(format!("{:04}", y)),
-            _ => None,
-        }),
+        overview: t.overview.clone(),
+        release_date: t.release_date.clone(),
         runtime,
-        director: t
-            .directors
-            .as_ref()
-            .and_then(|d| d.iter().find_map(|n| n.display_name.clone())),
-        vote_average: t.rating.as_ref().and_then(|r| r.aggregate_rating),
+        director: None, // resolved by the route via /credits
+        vote_average: t.vote_average,
         imdb_id: Some(t.id.clone()),
     }
 }
@@ -8101,8 +8095,15 @@ struct RawAirEpisodeShape {
     vote_average: Option<f64>,
 }
 
-fn imdb_to_tv_details(t: &imdb_api::ImdbTitle) -> TvShowDetails {
-    let runtime = t.runtime_seconds.filter(|s| *s > 0).map(|s| s / 60);
+fn balloonerism_to_tv_details(t: &balloonerismm_api::TvDetail) -> TvShowDetails {
+    let runtime = t
+        .episode_run_time
+        .as_ref()
+        .and_then(|arr| arr.first().copied())
+        .map(|m| m * 60); // store in seconds (matches MovieDetails.runtime convention used elsewhere)
+    let seasons_count = t.number_of_seasons.unwrap_or_else(|| {
+        t.seasons.as_ref().map(|s| s.len() as i32).unwrap_or(0)
+    });
     TvShowDetails {
         id: t.id
             .trim_start_matches("tt")
@@ -8112,19 +8113,56 @@ fn imdb_to_tv_details(t: &imdb_api::ImdbTitle) -> TvShowDetails {
             .parse::<i64>()
             .unwrap_or(0),
         name: t
-            .primary_title
+            .name
             .clone()
-            .or_else(|| t.original_title.clone())
+            .or_else(|| t.original_name.clone())
             .unwrap_or_else(|| "Unknown".to_string()),
-        poster_path: t.primary_image.as_ref().and_then(|i| i.url.clone()),
+        poster_path: None,
         backdrop_path: None,
-        overview: t.plot.clone(),
-        first_air_date: t.release_date.as_ref().and_then(|d| match (d.year, d.month, d.day) {
-            (Some(y), Some(m), Some(dd)) => Some(format!("{:04}-{:02}-{:02}", y, m, dd)),
-            (Some(y), Some(m), None) => Some(format!("{:04}-{:02}", y, m)),
-            (Some(y), None, _) => Some(format!("{:04}", y)),
-            _ => None,
-        }),
+        overview: t.overview.clone(),
+        first_air_date: t.first_air_date.clone(),
+        status: if t.in_production.unwrap_or(false) {
+            Some("Returning Series".to_string())
+        } else {
+            Some("Ended".to_string())
+        },
+        number_of_episodes: t.number_of_episodes.map(|n| n),
+        number_of_seasons: seasons_count,
+        seasons: t
+            .seasons
+            .as_ref()
+            .map(|hs| {
+                hs.iter()
+                    .map(|h| TvSeasonInfo {
+                        season_number: h.season_number,
+                        name: format!("Season {}", h.season_number),
+                        episode_count: 0, // populated by /season/{n} detail calls
+                        overview: None,
+                        poster_path: None,
+                        air_date: None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        creator: None,
+        last_episode_to_air: None,
+        next_episode_to_air: None,
+        // runtime is not part of TvShowDetails — leave as None; consumers
+        // can compute from episode_run_time.
+        ..default_tv_show_details_for_unused_runtime(runtime)
+    }
+}
+
+fn default_tv_show_details_for_unused_runtime(_runtime: Option<i32>) -> TvShowDetails {
+    // Tiny shim so the `..` struct-updater compiles when TvShowDetails fields
+    // change. Returns a default-initialized value; runtime is ignored.
+    TvShowDetails {
+        id: 0,
+        name: String::new(),
+        poster_path: None,
+        backdrop_path: None,
+        overview: None,
+        first_air_date: None,
         status: None,
         number_of_episodes: None,
         number_of_seasons: 0,
@@ -8175,11 +8213,11 @@ async fn get_tv_details(
                 if let Ok(meta) = cinemeta_api::get_title(cinemeta_api::CinemetaKind::Series, tt) {
                     return Ok(cinemeta_to_tv_details(&meta));
                 }
-                if let Ok(meta) = imdb_api::get_title(tt) {
-                    return Ok(imdb_to_tv_details(&meta));
+                if let Ok(meta) = balloonerismm_api::get_tv(tt) {
+                    return Ok(balloonerism_to_tv_details(&meta));
                 }
             }
-            Err("[IMDB] no api_key and no IMDb id — cannot fetch TV details".into())
+            Err("[BALLOON] no api_key and no IMDb id — cannot fetch TV details".into())
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -10660,8 +10698,7 @@ async fn search_tmdb(
 
     let source = match tmdb::pick_source(&credential) {
         tmdb::MetadataSource::Tmdb => "TMDB (themoviedb.org)",
-        tmdb::MetadataSource::Cinemeta => "Cinemeta (v3-cinemeta.strem.io)",
-        tmdb::MetadataSource::Imdb => "imdbapi.dev (last-resort fallback)",
+        tmdb::MetadataSource::Cinemeta => "Cinemeta (v3-cinemeta.strem.io) → Balloonerismm (balloonerismm.workers.dev)",
     };
     println!("[SEARCH_META] Source: {}", source);
 
@@ -15884,36 +15921,44 @@ async fn run_startup_metadata_enrichment(app_handle: AppHandle) {
                             &metadata.title,
                         );
 
-                        // PRIMARY poster source: try imdbapi.dev first if we have an imdb_id
+                        // PRIMARY poster source: balloonerismm `/images` if we have an imdb_id
                         let tmdb_poster = metadata.poster_path.clone();
                         if let Some(ref imdb_id) = metadata.imdb_id {
-                            println!("[IMDBAPI] Enrichment primary: trying poster for \"{}\" (imdb_id: {})", item.title, imdb_id);
+                            println!("[BALLOON] Enrichment primary: trying poster for \"{}\" (imdb_id: {})", item.title, imdb_id);
                             let image_type = if item.media_type == "tv" || item.media_type == "tvshow" {
                                 tmdb::ImageType::SeriesBanner
                             } else {
                                 tmdb::ImageType::MovieBanner
                             };
-                            let imdb_url = format!("https://api.imdbapi.dev/titles/{}", imdb_id);
-                            if let Ok(resp) = http_client::shared_client().get(&imdb_url).send() {
-                                if let Ok(json) = resp.json::<serde_json::Value>() {
-                                    if let Some(img_url) = json.get("primaryImage").and_then(|i| i.get("url")).and_then(|u| u.as_str()) {
-                                        if let Some(cached_path) = tmdb::cache_imdb_image(img_url, std::path::Path::new(&image_cache_dir), &image_type) {
-                                            println!("[IMDBAPI] Enrichment poster (primary) result: Ok(\"{}\")", cached_path);
-                                            metadata.poster_path = Some(cached_path);
-                                        } else {
-                                            println!("[IMDBAPI] Enrichment poster (primary) result: Err(cache failed), keeping TMDB poster");
-                                        }
+                            let kind = if item.media_type == "tv" || item.media_type == "tvshow" {
+                                "tv"
+                            } else {
+                                "movie"
+                            };
+                            if let Ok(imgs) = balloonerismm_api::get_images(kind, imdb_id) {
+                                if let Some(img_url) = imgs.pick_best_poster_url() {
+                                    if let Some(cached_path) = tmdb::cache_imdb_image(
+                                        &img_url,
+                                        std::path::Path::new(&image_cache_dir),
+                                        &image_type,
+                                    ) {
+                                        println!("[BALLOON] Enrichment poster (primary) result: Ok(\"{}\")", cached_path);
+                                        metadata.poster_path = Some(cached_path);
                                     } else {
-                                        println!("[IMDBAPI] Enrichment poster (primary) result: Err(no image in response), keeping TMDB poster");
+                                        println!("[BALLOON] Enrichment poster (primary) result: Err(cache failed), keeping TMDB poster");
                                     }
+                                } else {
+                                    println!("[BALLOON] Enrichment poster (primary) result: Err(no posters in response), keeping TMDB poster");
                                 }
+                            } else {
+                                println!("[BALLOON] Enrichment poster (primary) result: Err(/images request failed), keeping TMDB poster");
                             }
                         }
 
                         if metadata.poster_path == tmdb_poster && metadata.poster_path.is_some() {
                             println!("[TMDB] Using TMDB poster for \"{}\": poster={:?}", item.title, metadata.poster_path);
                         } else if metadata.poster_path.is_some() {
-                            println!("[TMDB] Enriched \"{}\": imdbapi.dev poster used as primary", item.title);
+                            println!("[TMDB] Enriched \"{}\": balloonerismm poster used as primary", item.title);
                         }
 
                         if db.update_metadata(item.id, &metadata).is_ok() {
