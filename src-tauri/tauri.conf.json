@@ -2,13 +2,13 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
-    "devPath": "http://localhost:3000",
+    "devPath": "http://localhost:3255",
     "distDir": "../dist",
     "withGlobalTauri": false
   },
   "package": {
     "productName": "SlasshyVault",
-    "version": "3.0.60"
+    "version": "3.0.61"
   },
   "tauri": {
     "allowlist": {
@@ -53,8 +53,8 @@
           "https://episodes.metahub.space/**",
           "https://www.googleapis.com/**",
           "https://slasshyvault.onrender.com/**",
-          "http://localhost:3000/**",
-          "http://127.0.0.1:3000/**"
+          "http://localhost:3255/**",
+          "http://127.0.0.1:3255/**"
         ]
       },
       "shell": {
