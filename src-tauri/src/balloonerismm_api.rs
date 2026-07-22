@@ -144,6 +144,7 @@ pub struct SeasonEpisode {
 // ── Search envelopes ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SearchPage<T> {
     pub page: i32,
     pub page_token: Option<String>,
