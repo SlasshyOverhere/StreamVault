@@ -171,10 +171,8 @@ pub enum MetadataSource {
     /// TMDB API key is configured — talk to themoviedb.org.
     Tmdb,
     /// No TMDB API key — talk to v3-cinemeta.strem.io (free, no key,
-    /// richer than imdbapi.dev: cast/director/imdbRating/moviedb_id/episode thumbs).
+    /// cast/director/imdbRating/moviedb_id/episode thumbs).
     Cinemeta,
-    /// Last resort — `api.imdbapi.dev`. Used when Cinemeta returned nothing.
-    Imdb,
 }
 
 /// Pick the preferred metadata source for a given configured TMDB API key.
@@ -599,9 +597,7 @@ pub fn search_metadata_with_fallback(
                 "tv" => crate::cinemeta_api::CinemetaKind::Series,
                 _ => crate::cinemeta_api::CinemetaKind::Movie,
             };
-            if let Ok(titles) =
-                crate::cinemeta_api::search(cinemeta_kind, title, 25)
-            {
+            if let Ok(titles) = crate::cinemeta_api::search(cinemeta_kind, title, 25) {
                 let best = titles.into_iter().find(|t| {
                     if let Some(y) = year {
                         parse_year_str(t.year.as_deref())
@@ -616,68 +612,78 @@ pub fn search_metadata_with_fallback(
                     return fetch_metadata_by_cinemeta_title(&t, mtype, image_cache_dir).map(Some);
                 }
             }
-            let imdb_type_filter = match media_type {
-                "movie" => Some("movie"),
-                "tv" => Some("tv"),
-                _ => None,
-            };
-            let candidates =
-                crate::imdb_api::search_titles(title, imdb_type_filter, 25).map_err(|e| {
-                    Box::<dyn std::error::Error + Send + Sync>::from(e.to_string())
-                })?;
-            let best = candidates.into_iter().find(|c| {
-                if let Some(y) = year {
-                    c.start_year.map(|cy| (cy - y).abs() <= 1).unwrap_or(false)
-                } else {
-                    true
-                }
-            });
-            match best {
-                Some(t) => {
-                    let mtype = match t.type_.as_deref() {
-                        Some("TV_SERIES") | Some("TV_MINI_SERIES") | Some("TV_SPECIAL") => "tv",
-                        _ => "movie",
-                    };
-                    fetch_metadata_by_imdb_id(&t.id, mtype, image_cache_dir).map(Some)
-                }
-                None => {
-                    println!("[IMDBAPI] no match found for \"{}\"", title);
-                    Ok(None)
-                }
-            }
-        }
-        MetadataSource::Imdb => {
-            let imdb_type_filter = match media_type {
-                "movie" => Some("movie"),
-                "tv" => Some("tv"),
-                _ => None,
-            };
-            let candidates =
-                crate::imdb_api::search_titles(title, imdb_type_filter, 25).map_err(|e| {
-                    Box::<dyn std::error::Error + Send + Sync>::from(e.to_string())
-                })?;
-            let best = candidates.into_iter().find(|c| {
-                if let Some(y) = year {
-                    c.start_year.map(|cy| (cy - y).abs() <= 1).unwrap_or(false)
-                } else {
-                    true
-                }
-            });
-            match best {
-                Some(t) => {
-                    let mtype = match t.type_.as_deref() {
-                        Some("TV_SERIES") | Some("TV_MINI_SERIES") | Some("TV_SPECIAL") => "tv",
-                        _ => "movie",
-                    };
-                    fetch_metadata_by_imdb_id(&t.id, mtype, image_cache_dir).map(Some)
-                }
-                None => {
-                    println!("[IMDBAPI] no match found for \"{}\"", title);
-                    Ok(None)
-                }
-            }
+            // Cinemeta empty → fall back to balloonerismm (no-key TMDB proxy).
+            // imdbapi.dev is gone as a source of truth for metadata.
+            balloonerismm_fallback_search(title, media_type, year, image_cache_dir)
         }
     }
+}
+
+/// Best-effort metadata lookup against balloonerismm after Cinemeta returns
+/// nothing. Used as the imdbapi.dev-replacement last-resort in
+/// `search_metadata_with_fallback`. Returns `Ok(None)` when balloonerismm
+/// has no `tt…` row at all.
+fn balloonerismm_fallback_search(
+    title: &str,
+    media_type: &str,
+    year: Option<i32>,
+    image_cache_dir: &str,
+) -> Result<Option<TmdbMetadata>, Box<dyn std::error::Error + Send + Sync>> {
+    let kinds: &[&str] = match media_type {
+        "movie" => &["movie"],
+        "tv" => &["tv"],
+        _ => &["movie", "tv"],
+    };
+    for &kind in kinds {
+        // Pull the appropriate search response.
+        let (json_results, mapped_media_type) = if kind == "movie" {
+            let page = crate::balloonerismm_api::search_movie(title).map_err(|e| {
+                Box::<dyn std::error::Error + Send + Sync>::from(e.to_string())
+            })?;
+            let v: Vec<serde_json::Value> = page
+                .results
+                .into_iter()
+                .map(|r| serde_json::to_value(r).unwrap_or(serde_json::Value::Null))
+                .collect();
+            (v, "movie")
+        } else {
+            let page = crate::balloonerismm_api::search_tv(title).map_err(|e| {
+                Box::<dyn std::error::Error + Send + Sync>::from(e.to_string())
+            })?;
+            let v: Vec<serde_json::Value> = page
+                .results
+                .into_iter()
+                .map(|r| serde_json::to_value(r).unwrap_or(serde_json::Value::Null))
+                .collect();
+            (v, "tv")
+        };
+
+        // Pick the closest candidate (year match ±1, otherwise first).
+        let candidate = json_results
+            .iter()
+            .filter_map(|v| {
+                let obj = v.as_object()?;
+                let id = obj.get("id").and_then(|v| v.as_str())?.trim().to_string();
+                let item_year = obj
+                    .get("release_date")
+                    .or_else(|| obj.get("first_air_date"))
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.split('-').next())
+                    .and_then(|y| y.parse::<i32>().ok());
+                Some((id, item_year))
+            })
+            .find(|(_, iy)| match (year, iy) {
+                (Some(y), Some(iy)) => (y - iy).abs() <= 1,
+                _ => true,
+            })
+            .map(|(id, _)| id);
+
+        if let Some(tt) = candidate {
+            return fetch_metadata_by_imdb_id(&tt, mapped_media_type, image_cache_dir).map(Some);
+        }
+    }
+    println!("[BALLOON] no match found for \"{}\"", title);
+    Ok(None)
 }
 
 fn fetch_metadata_by_cinemeta_title(
@@ -844,9 +850,9 @@ pub fn search_multi_raw_with_fallback(
         MetadataSource::Tmdb => search_multi_raw(api_key, query),
         MetadataSource::Cinemeta => match cinemeta_search_as_list_items(query, media_type) {
             Ok(items) if !items.is_empty() => Ok(items),
+            // Cinemeta empty → fall back to balloonerismm (imdbapi.dev is gone).
             _ => imdb_search_as_list_items(query, media_type),
         },
-        MetadataSource::Imdb => imdb_search_as_list_items(query, media_type),
     }
 }
 
@@ -902,37 +908,122 @@ fn imdb_search_as_list_items(
     query: &str,
     media_type: Option<&str>,
 ) -> Result<Vec<TmdbSearchListItem>, Box<dyn std::error::Error + Send + Sync>> {
-    let imdb_type = match media_type {
-        Some("movie") => Some("movie"),
-        Some("tv") => Some("tv"),
-        _ => None,
-    };
-    let imdb_results = crate::imdb_api::search_titles(query, imdb_type, 25)
-        .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(e.to_string()))?;
-    Ok(imdb_results
-        .into_iter()
-        .map(|t| {
-            let normalized_type = match t.type_.as_deref() {
-                Some("TV_SERIES") | Some("TV_MINI_SERIES") | Some("TV_SPECIAL") => "tv".to_string(),
-                _ => "movie".to_string(),
-            };
-            let year_str = t.start_year.map(|y| format!("{y}-01-01"));
-            let poster_path = t.primary_image.and_then(|i| i.url);
-            TmdbSearchListItem {
-                id: parse_imdb_id_to_i64(&t.id),
-                title: t.primary_title.clone(),
-                name: t.primary_title.clone(),
-                media_type: normalized_type,
-                poster_path,
-                backdrop_path: None,
-                overview: None,
-                release_date: year_str.clone(),
-                first_air_date: year_str,
-                vote_average: t.rating.as_ref().and_then(|r| r.aggregate_rating),
-                imdb_id: Some(t.id),
+    // Balloonerismm `/search/multi` returns both movie and TV rows keyed by
+    // `media_type`. Drop imdbapi.dev dependency entirely.
+    //
+    // If `media_type` narrowed to a single kind, hit balloonerismm's per-kind
+    // search endpoint to keep response shape stable.
+    let page = match media_type {
+        Some("movie") => {
+            let p: crate::balloonerismm_api::SearchPage<
+                crate::balloonerismm_api::MovieSearchResult,
+            > = crate::balloonerismm_api::search_movie(query)
+                .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(e.to_string()))?;
+            // Lift to a common enum of JSON values so the mapping below is uniform.
+            let json_results: Vec<serde_json::Value> = p
+                .results
+                .into_iter()
+                .map(|r| {
+                    serde_json::to_value(r).unwrap_or_else(|_| serde_json::Value::Null)
+                })
+                .collect();
+            crate::balloonerismm_api::SearchPage {
+                page: p.page,
+                page_token: p.page_token,
+                has_next_page: p.has_next_page,
+                results: json_results,
             }
+        }
+        Some("tv") => {
+            let p: crate::balloonerismm_api::SearchPage<
+                crate::balloonerismm_api::TvSearchResult,
+            > = crate::balloonerismm_api::search_tv(query)
+                .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(e.to_string()))?;
+            let json_results: Vec<serde_json::Value> = p
+                .results
+                .into_iter()
+                .map(|r| {
+                    serde_json::to_value(r).unwrap_or_else(|_| serde_json::Value::Null)
+                })
+                .collect();
+            crate::balloonerismm_api::SearchPage {
+                page: p.page,
+                page_token: p.page_token,
+                has_next_page: p.has_next_page,
+                results: json_results,
+            }
+        }
+        _ => crate::balloonerismm_api::search_multi(query)
+            .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(e.to_string()))?,
+    };
+
+    Ok(page
+        .results
+        .into_iter()
+        .filter_map(|v| {
+            let obj = v.as_object()?;
+            let id = obj.get("id").and_then(|v| v.as_str())?.trim().to_string();
+            if !crate::balloonerismm_api::looks_like_imdb_id(&id) {
+                return None;
+            }
+            let media_type = obj
+                .get("media_type")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "movie".to_string());
+            let title = obj
+                .get("title")
+                .or_else(|| obj.get("name"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let name = obj
+                .get("name")
+                .or_else(|| obj.get("title"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let poster_path = obj
+                .get("poster_path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let backdrop_path = obj
+                .get("backdrop_path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let overview = obj
+                .get("overview")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let release_date = obj
+                .get("release_date")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let first_air_date = obj
+                .get("first_air_date")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let vote_average = obj.get("vote_average").and_then(|v| v.as_f64());
+            // TT-only id; we keep the IMDb id rather than parsing `id` to a TMDB numeric.
+            let tt_id = id.clone();
+            Some(TmdbSearchListItem {
+                id: parse_imdb_id_to_i64(&tt_id),
+                title: title.clone(),
+                name: title.or(name),
+                media_type,
+                poster_path,
+                backdrop_path,
+                overview,
+                release_date,
+                first_air_date,
+                vote_average,
+                imdb_id: Some(tt_id),
+            })
         })
         .collect())
+}
+
+fn _unused_search_type_picker_marker(_t: Option<&str>) {
+    // (Function body removed — was the tail of the old imdbapi-based
+    // imdb_search_as_list_items implementation.)
 }
 
 fn parse_imdb_id_to_i64(id: &str) -> i64 {
@@ -945,15 +1036,39 @@ fn parse_imdb_id_to_i64(id: &str) -> i64 {
 }
 
 /// Fetch top trending movies and TV shows for lightweight UI suggestions.
+///
+/// Balloonerismm has `/popular/{all|movie|tv}` which we hit when no TMDB key
+/// is configured — replaces the imdbapi.dev "return [] for no-key" branch.
 pub fn trending_suggestions_raw(
     api_key: &str,
     per_type_limit: usize,
 ) -> Result<Vec<TmdbTrendingListItem>, Box<dyn std::error::Error + Send + Sync>> {
     if api_key.trim().is_empty() {
-        println!(
-            "[IMDBAPI] trending endpoint not available on imdbapi.dev (api_key empty); returning []"
-        );
-        return Ok(Vec::new());
+        // No TMDB key — pull from balloonerismm's free `/popular/*` pages.
+        let mut suggestions = Vec::new();
+        for kind in ["movie", "tv"] {
+            let page = crate::balloonerismm_api::popular(kind, per_type_limit)
+                .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(e.to_string()))?;
+            suggestions.extend(page.results.into_iter().filter_map(|v| {
+                let obj = v.as_object()?;
+                let id = obj.get("id").and_then(|v| v.as_str())?.trim().to_string();
+                if !crate::balloonerismm_api::looks_like_imdb_id(&id) {
+                    return None;
+                }
+                let title = obj
+                    .get("title")
+                    .or_else(|| obj.get("name"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())?;
+                Some(TmdbTrendingListItem {
+                    id: parse_imdb_id_to_i64(&id),
+                    title,
+                    media_type: kind.to_string(),
+                })
+            }));
+        }
+        return Ok(suggestions);
     }
 
     #[derive(Debug, Deserialize)]
@@ -1499,29 +1614,34 @@ fn create_metadata_from_item(
 
     let mut imdb_image_url: Option<String> = None;
 
-    // Always try imdbapi.dev for poster if imdb_id is available — prefer over TMDB poster
+    // Pull a higher-quality poster from balloonerismm `/images` when we know
+    // the IMDb id — replaces the old imdbapi.dev primary-image lookup.
     if let Some(ref id) = imdb_id {
         let had_tmdb_poster = poster_path.is_some();
-        println!("[IMDBAPI] Poster lookup for \"{}\" (imdb_id: {}, had_tmdb_poster: {})", found_title, id, had_tmdb_poster);
-        let imdb_url = format!("https://api.imdbapi.dev/titles/{}", id);
-        println!("[TMDB]   -> Trying imdbapi.dev for poster: {}", imdb_url);
-        if let Ok(resp) = crate::http_client::shared_client().get(&imdb_url).send() {
-            if let Ok(json) = resp.json::<serde_json::Value>() {
-                if let Some(img_url) = json.get("primaryImage").and_then(|i| i.get("url")).and_then(|u| u.as_str()) {
-                    println!("[TMDB]   -> Got imdbapi.dev image: {}", img_url);
-                    let imdb_poster = cache_imdb_image(img_url, std::path::Path::new(image_cache_dir), &image_type);
-                    println!("[IMDBAPI] Poster result: {:?}", imdb_poster);
-                    if imdb_poster.is_some() {
-                        if had_tmdb_poster {
-                            println!("[IMDBAPI] Overriding TMDB poster with imdbapi.dev poster for \"{}\"", found_title);
-                        }
-                        poster_path = imdb_poster;
+        println!(
+            "[BALLOON] Poster upgrade attempt for \"{}\" (imdb_id: {}, had_tmdb_poster: {})",
+            found_title, id, had_tmdb_poster
+        );
+        let kind = media_type;
+        if let Ok(imgs) = crate::balloonerismm_api::get_images(kind, id) {
+            if let Some(img_url) = imgs.pick_best_poster_url() {
+                println!("[BALLOON]   -> Got poster: {}", img_url);
+                if let Some(cached) = cache_imdb_image(
+                    &img_url,
+                    std::path::Path::new(image_cache_dir),
+                    &image_type,
+                ) {
+                    if had_tmdb_poster {
+                        println!("[BALLOON]   -> Overriding TMDB poster for \"{}\"", found_title);
                     }
-                    imdb_image_url = Some(img_url.to_string());
-                } else {
-                    println!("[TMDB]   -> imdbapi.dev returned no primaryImage for \"{}\"", found_title);
+                    poster_path = Some(cached);
                 }
+                imdb_image_url = Some(img_url);
+            } else {
+                println!("[BALLOON]   -> no posters/backdrops returned for \"{}\"", found_title);
             }
+        } else {
+            println!("[BALLOON]   -> /images request failed for \"{}\"", found_title);
         }
     }
 
@@ -1661,16 +1781,7 @@ pub fn fetch_metadata_by_id_with_fallback(
             if let Ok(meta) = crate::cinemeta_api::get_title(kind, &id) {
                 return fetch_metadata_by_cinemeta_title(&meta, media_type, image_cache_dir);
             }
-            fetch_metadata_by_imdb_id(&id, media_type, image_cache_dir)
-        }
-        MetadataSource::Imdb => {
-            if source != "imdb" {
-                return Err(format!(
-                    "[IMDBAPI] cannot resolve numeric id {} without a TMDB key (only IMDb ids)",
-                    id
-                )
-                .into());
-            }
+            // Cinemeta empty → balloonerismm (imdbapi.dev is gone).
             fetch_metadata_by_imdb_id(&id, media_type, image_cache_dir)
         }
     }
@@ -1681,59 +1792,156 @@ fn fetch_metadata_by_imdb_id(
     media_type: &str,
     image_cache_dir: &str,
 ) -> Result<TmdbMetadata, Box<dyn std::error::Error + Send + Sync>> {
-    let title = crate::imdb_api::get_title(imdb_id).map_err(|e| e.to_string())?;
-
+    // Balloonerismm: no-key, TMDB-shape proxy that gives us posters + credits
+    // + cast in one place — replaces imdbapi.dev entirely.
+    let id = imdb_id.trim();
+    if !crate::balloonerismm_api::looks_like_imdb_id(id) {
+        return Err(format!("[BALLOON] not an IMDb id: {}", id).into());
+    }
     let image_type = if media_type == "tv" {
         ImageType::SeriesBanner
     } else {
         ImageType::MovieBanner
     };
 
-    let poster_path = title
-        .primary_image
+    if media_type == "tv" {
+        let t = crate::balloonerismm_api::get_tv(id).map_err(|e| e.to_string())?;
+        let year = t
+            .first_air_date
+            .as_deref()
+            .and_then(|s| s.split('-').next())
+            .and_then(|y| y.parse::<i32>().ok());
+        let runtime_seconds = t
+            .episode_run_time
+            .as_ref()
+            .and_then(|arr| arr.first().copied())
+            .filter(|m| *m > 0)
+            .map(|m| (m as f64) * 60.0);
+
+        // Poster via /tv/{tt}/images; fall back to series `seasons[0].poster_path` indirectly by
+        // requesting the TV images endpoint. If both fail, no poster.
+        let poster_url = crate::balloonerismm_api::get_images("tv", id)
+            .ok()
+            .and_then(|imgs| imgs.pick_best_poster_url());
+        let imdb_image_url = poster_url.clone();
+        let poster_path = poster_url
+            .as_deref()
+            .and_then(|url| cache_imdb_image(url, std::path::Path::new(image_cache_dir), &image_type));
+
+        // TV credits — cast (top 8) and "director" slot (an Executive Producer or Creator if present).
+        let credits = crate::balloonerismm_api::get_credits("tv", id).ok();
+        let cast_names = credits
+            .as_ref()
+            .and_then(|c| c.cast.as_ref())
+            .map(|cast| {
+                cast.iter()
+                    .filter_map(|member| member.name.as_ref())
+                    .map(|n| n.trim())
+                    .filter(|n| !n.is_empty())
+                    .take(8)
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty())
+            .map(|v| v.join(", "));
+        let director = credits.as_ref().and_then(|c| c.crew.as_ref()).and_then(|crew| {
+            crew.iter()
+                .find(|m| {
+                    m.job.as_deref()
+                        .map(|j| {
+                            let j = j.to_ascii_lowercase();
+                            j.contains("creator") || j.contains("showrunner")
+                        })
+                        .unwrap_or(false)
+                })
+                .or_else(|| crew.first())
+                .and_then(|m| m.name.clone())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+
+        return Ok(TmdbMetadata {
+            title: t
+                .name
+                .clone()
+                .or(t.original_name.clone())
+                .unwrap_or_else(|| "Unknown".to_string()),
+            year,
+            overview: t.overview.clone(),
+            cast_names,
+            director,
+            poster_path,
+            tmdb_id: None,
+            imdb_id: Some(t.id.clone()),
+            runtime_seconds,
+            imdb_image_url,
+        });
+    }
+
+    // Movie branch
+    let m = crate::balloonerismm_api::get_movie(id).map_err(|e| e.to_string())?;
+    let year = m
+        .release_date
+        .as_deref()
+        .and_then(|s| s.split('-').next())
+        .and_then(|y| y.parse::<i32>().ok());
+    let runtime_seconds = m
+        .runtime
+        .filter(|minutes| *minutes > 0)
+        .map(|minutes| (minutes as f64) * 60.0);
+
+    // Best poster comes from /movie/{tt}/images when available; fall back to none.
+    let poster_url = crate::balloonerismm_api::get_images("movie", id)
+        .ok()
+        .and_then(|imgs| imgs.pick_best_poster_url());
+    let imdb_image_url = poster_url.clone();
+    let poster_path = poster_url
+        .as_deref()
+        .and_then(|url| cache_imdb_image(url, std::path::Path::new(image_cache_dir), &image_type));
+
+    // Cast + director from /credits.
+    let credits = crate::balloonerismm_api::get_credits("movie", id).ok();
+    let cast_names = credits
         .as_ref()
-        .and_then(|i| i.url.clone())
-        .and_then(|url| cache_imdb_image(&url, std::path::Path::new(image_cache_dir), &image_type));
-
-    let year = title.start_year.or(title.release_date.as_ref().and_then(|d| d.year));
-
-    let cast_names = title.cast.as_ref().and_then(|c| {
-        let mut v: Vec<String> = c
-            .iter()
-            .filter_map(|n| n.display_name.clone())
-            .filter(|n| !n.trim().is_empty())
-            .take(8)
-            .collect();
-        if v.is_empty() {
-            None
-        } else {
-            Some(v.join(", "))
-        }
+        .and_then(|c| c.cast.as_ref())
+        .map(|cast| {
+            cast.iter()
+                .filter_map(|member| member.name.as_ref())
+                .map(|n| n.trim())
+                .filter(|n| !n.is_empty())
+                .take(8)
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+        })
+        .filter(|v| !v.is_empty())
+        .map(|v| v.join(", "));
+    let director = credits.as_ref().and_then(|c| c.crew.as_ref()).and_then(|crew| {
+        crew.iter()
+            .find(|m| {
+                m.job.as_deref()
+                    .map(|j| j.eq_ignore_ascii_case("Director"))
+                    .unwrap_or(false)
+            })
+            .and_then(|m| m.name.clone())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     });
 
-    let director = title
-        .directors
-        .as_ref()
-        .and_then(|ds| ds.iter().find_map(|d| d.display_name.clone()));
-
     Ok(TmdbMetadata {
-        title: title
-            .primary_title
+        title: m
+            .title
             .clone()
-            .or(title.original_title.clone())
+            .or(m.original_title.clone())
             .unwrap_or_else(|| "Unknown".to_string()),
         year,
-        overview: title.plot.clone(),
+        overview: m.overview.clone(),
         cast_names,
         director,
         poster_path,
         tmdb_id: None,
-        imdb_id: Some(title.id.clone()),
-        runtime_seconds: title
-            .runtime_seconds
-            .filter(|s| *s > 0)
-            .map(|s| s as f64),
-        imdb_image_url: title.primary_image.as_ref().and_then(|i| i.url.clone()),
+        imdb_id: Some(m.id.clone()),
+        runtime_seconds,
+        imdb_image_url,
     })
 }
 
@@ -2245,59 +2453,51 @@ pub fn fetch_season_episodes_with_fallback(
     image_cache_dir: &str,
 ) -> Result<TmdbSeasonInfo, Box<dyn std::error::Error + Send + Sync>> {
     let trimmed = tid.trim();
-    if crate::imdb_api::looks_like_imdb_id(trimmed) {
-        let eps = crate::imdb_api::list_episodes(trimmed, Some(season_number.max(0) as u32))
+    if crate::balloonerismm_api::looks_like_imdb_id(trimmed) {
+        // Balloonerismm: free TMDB-shape proxy. /tv/{tt}/season/{n} returns the
+        // season plus every episode with still_path, vote_average, overview,
+        // runtime. Replaces imdb_api::list_episodes entirely.
+        let season = crate::balloonerismm_api::get_season(trimmed, season_number.max(1))
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
-        let mut poster_path: Option<String> = None;
-        if let Some(url) = crate::imdb_api::get_title(trimmed)
-            .ok()
-            .and_then(|t| t.primary_image.and_then(|i| i.url))
-        {
-            poster_path = cache_imdb_image(
-                &url,
-                std::path::Path::new(image_cache_dir),
-                &ImageType::SeriesBanner,
-            );
-        }
-        let episodes: Vec<TmdbEpisodeInfo> = eps
+        let season_poster_url = season.poster_path.clone();
+        let poster_path = season_poster_url
+            .as_deref()
+            .and_then(|url| cache_imdb_image(url, std::path::Path::new(image_cache_dir), &ImageType::SeriesBanner));
+
+        let episodes: Vec<TmdbEpisodeInfo> = season
+            .episodes
+            .unwrap_or_default()
             .into_iter()
+            .filter(|e| e.episode_number.unwrap_or(0) > 0) // drop episode 0 (unaired pilots)
             .map(|e| TmdbEpisodeInfo {
                 episode_number: e.episode_number.unwrap_or(0),
-                season_number: season_number,
-                name: e.title.unwrap_or_else(|| "(untitled)".to_string()),
-                overview: e.plot,
+                season_number: e.season_number.unwrap_or(season_number),
+                name: e.name.unwrap_or_else(|| "(untitled)".to_string()),
+                overview: e.overview,
                 still_path: e
-                    .primary_image
-                    .and_then(|i| i.url)
+                    .still_path
                     .and_then(|url| {
                         cache_imdb_image(
                             &url,
                             std::path::Path::new(image_cache_dir),
                             &ImageType::EpisodeBanner {
-                                season: season_number,
+                                season: e.season_number.unwrap_or(season_number),
                                 episode: e.episode_number.unwrap_or(0),
                             },
                         )
                     }),
-                air_date: e
-                    .release_date
-                    .as_ref()
-                    .and_then(|d| {
-                        match (d.year, d.month, d.day) {
-                            (Some(y), Some(m), Some(dd)) => Some(format!("{:04}-{:02}-{:02}", y, m, dd)),
-                            (Some(y), Some(m), None) => Some(format!("{:04}-{:02}", y, m)),
-                            (Some(y), None, None) => Some(y.to_string()),
-                            _ => None,
-                        }
-                    }),
-                vote_average: e.rating.as_ref().and_then(|r| r.aggregate_rating),
+                air_date: e.air_date,
+                vote_average: e.vote_average,
             })
             .collect();
-        let season_name = format!("Season {}", season_number);
+        let season_name = season
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("Season {}", season_number));
         return Ok(TmdbSeasonInfo {
-            season_number,
+            season_number: season.season_number.unwrap_or(season_number),
             name: season_name,
-            overview: None,
+            overview: season.overview,
             poster_path,
             episode_count: episodes.len() as i32,
             episodes,
@@ -2305,7 +2505,7 @@ pub fn fetch_season_episodes_with_fallback(
     }
 
     if api_key.trim().is_empty() {
-        return Err("[IMDBAPI] cannot resolve TMDB numeric id without an API key".into());
+        return Err("[BALLOON] cannot resolve TMDB numeric id without an API key".into());
     }
     fetch_season_episodes(api_key, trimmed, season_number, series_title, image_cache_dir)
 }
