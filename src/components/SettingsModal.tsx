@@ -1715,8 +1715,17 @@ export function SettingsModal({
                         <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
                           <p className="text-xs text-blue-300 leading-relaxed">
                             TMDB is <strong>optional</strong>. Without one, metadata queries fall back to
-                            the free <a className="underline" href="https://imdbapi.dev" target="_blank" rel="noopener noreferrer">imdbapi.dev</a> service.
-                            IMDb ratings also use imdbapi.dev by default — OMDb is only needed for
+                            Cinemeta (free, Stremio catalog) then to{" "}
+                            <a
+                              className="underline"
+                              href="https://api.balloonerismm.workers.dev"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              Balloonerismm
+                            </a>{" "}
+                            (free, no-key TMDB-shaped mirror) for posters, episode listings, cast,
+                            and trending. IMDb ratings also use OMDb by default — OMDb is only needed for
                             dedicated rate limits.
                           </p>
                         </div>
@@ -1744,18 +1753,18 @@ export function SettingsModal({
                                     tmdb_api_key: e.target.value,
                                   })
                                 }
-                                placeholder="Leave blank to use imdbapi.dev (free)"
+                                placeholder="Leave blank to use Cinemeta + Balloonerismm (free)"
                               />
                               <p className="text-xs text-muted-foreground mt-1.5">
                                 Recommended for richer metadata and trending suggestions.
                                 Without a key, the app falls back to the free{" "}
                                 <a
-                                  href="https://imdbapi.dev"
+                                  href="https://api.balloonerismm.workers.dev"
                                   target="_blank"
                                   rel="noopener noreferrer"
                                   className="text-white hover:underline"
                                 >
-                                  imdbapi.dev
+                                  Balloonerismm
                                 </a>{" "}
                                 service. Get yours at{" "}
                                 <a
