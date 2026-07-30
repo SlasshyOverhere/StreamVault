@@ -23,3 +23,4 @@ export * from './CalendarView';
 export * from './SmartCollections';
 export * from './SubtitleSelector';
 export * from './Clock';
+export * from './OfflineBanner';

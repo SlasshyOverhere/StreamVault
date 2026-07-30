@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App.tsx'
 import ErrorBoundary from './components/ErrorBoundary'
+import { ConnectivityProvider } from './hooks/useConnectivity'
 import './index.css'
 
 // Automatic DPI / resolution scaling.
@@ -25,7 +26,10 @@ window.addEventListener('resize', applyDpiScale)
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ErrorBoundary>
-      <App />
+      <ConnectivityProvider>
+        <App />
+      </ConnectivityProvider>
     </ErrorBoundary>
   </React.StrictMode>,
 )
+

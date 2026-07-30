@@ -14306,6 +14306,21 @@ fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Probe a well-known endpoint to determine whether the device has internet access.
+/// Returns true if the probe succeeds within the timeout, false otherwise.
+#[tauri::command]
+async fn check_connectivity() -> Result<bool, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    match client.head("https://www.google.com/generate_204").send().await {
+        Ok(response) => Ok(response.status().is_success()),
+        Err(_) => Ok(false),
+    }
+}
+
 #[cfg(test)]
 mod install_update_tests {
     use super::{get_valid_installer_path, updater_staging_root};
@@ -19127,6 +19142,7 @@ fn main() {
             download_update,
             install_update,
             get_app_version,
+            check_connectivity,
             // Developer console commands
             get_recent_logs,
             clear_logs,

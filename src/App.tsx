@@ -14,6 +14,7 @@ import {
   WatchTogetherBanner,
   LoginScreen,
   ReauthBanner,
+  OfflineBanner,
   ContentDetailsModal,
   ZipPlaybackLoadingOverlay,
   NotificationCenter,
@@ -2097,6 +2098,7 @@ function App() {
 
   return (
     <OptimizationContext.Provider value={optim}>
+    <OfflineBanner />
     <div className={`flex h-screen text-foreground overflow-hidden ${isNativePlaying ? 'bg-transparent' : 'bg-background bg-gradient-mesh'}`}>
       {/* Indexing confirmation dialog for first-time users */}
       <Dialog open={showIndexingPrompt} onOpenChange={declineIndexing}>

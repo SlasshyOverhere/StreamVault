@@ -2667,3 +2667,6 @@ export const listDebridServices = async (): Promise<DebridService[]> =>
 export const setDefaultDebridService = async (kind: DebridKind): Promise<void> => {
   await invoke('debrid_set_default', { kind })
 }
+
+export const checkConnectivity = async (): Promise<boolean> =>
+  await invoke<boolean>('check_connectivity')
