@@ -39,6 +39,7 @@ pub fn get_bundled_mpv_rar_temp_path() -> PathBuf {
 }
 
 /// Search for mpv.exe inside the extracted bundled directory (recursive)
+#[cfg(not(target_os = "linux"))]
 pub fn get_bundled_mpv_path() -> PathBuf {
     let dir = get_bundled_mpv_dir();
     if !dir.exists() {
@@ -47,6 +48,7 @@ pub fn get_bundled_mpv_path() -> PathBuf {
     find_mpv_recursive(&dir).unwrap_or_else(|| dir.join("mpv.exe"))
 }
 
+#[cfg(not(target_os = "linux"))]
 fn find_mpv_recursive(dir: &Path) -> Option<PathBuf> {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.filter_map(|e| e.ok()) {
@@ -57,11 +59,42 @@ fn find_mpv_recursive(dir: &Path) -> Option<PathBuf> {
                 }
             } else if path.is_file() {
                 let name = path.file_stem()?.to_str()?;
-                if name.eq_ignore_ascii_case("mpv") || name.eq_ignore_ascii_case("slasshyvault-mpv") {
+                if name.eq_ignore_ascii_case("mpv") || name.eq_ignore_ascii_case("slasshyvault-mpv")
+                {
                     let ext = path.extension()?.to_str()?;
                     if ext.eq_ignore_ascii_case("exe") {
                         return Some(path);
                     }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Search for an extensionless Linux MPV binary inside the extracted directory.
+#[cfg(target_os = "linux")]
+pub fn get_bundled_mpv_path() -> PathBuf {
+    let dir = get_bundled_mpv_dir();
+    if !dir.exists() {
+        return dir.join("mpv");
+    }
+    find_mpv_recursive(&dir).unwrap_or_else(|| dir.join("mpv"))
+}
+
+#[cfg(target_os = "linux")]
+fn find_mpv_recursive(dir: &Path) -> Option<PathBuf> {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = find_mpv_recursive(&path) {
+                    return Some(found);
+                }
+            } else if path.is_file() {
+                let name = path.file_name()?.to_str()?;
+                if (name == "mpv" || name == "slasshyvault-mpv") && path.extension().is_none() {
+                    return Some(path);
                 }
             }
         }
@@ -109,6 +142,7 @@ const MPV_SEARCH_PATHS: &[&str] = &[
 
 /// Search for mpv.exe on the system
 /// Returns the path if found, None otherwise
+#[cfg(not(target_os = "linux"))]
 pub fn find_mpv_executable() -> Option<String> {
     println!("[MPV] Searching for mpv.exe on the system...");
 
@@ -165,6 +199,40 @@ pub fn find_mpv_executable() -> Option<String> {
     }
 
     println!("[MPV] mpv.exe not found on the system");
+    None
+}
+
+/// Search for mpv on Linux through PATH and standard package locations.
+#[cfg(target_os = "linux")]
+pub fn find_mpv_executable() -> Option<String> {
+    println!("[MPV] Searching for mpv on the system...");
+
+    if bundled_mpv_exists() {
+        let path = get_bundled_mpv_path().to_string_lossy().to_string();
+        println!("[MPV] Found bundled mpv at: {}", path);
+        return Some(path);
+    }
+
+    let output = Command::new("which").arg("mpv").output().ok()?;
+    if output.status.success() {
+        if let Some(path) = String::from_utf8(output.stdout)
+            .ok()
+            .and_then(|paths| paths.lines().map(str::trim).find(|path| !path.is_empty()).map(str::to_string))
+            .filter(|path| Path::new(path).is_file())
+        {
+            println!("[MPV] Found mpv in PATH: {}", path);
+            return Some(path.to_string());
+        }
+    }
+
+    for path in ["/usr/bin/mpv", "/usr/local/bin/mpv", "/snap/bin/mpv"] {
+        if Path::new(path).is_file() {
+            println!("[MPV] Found mpv at: {}", path);
+            return Some(path.to_string());
+        }
+    }
+
+    println!("[MPV] mpv not found on the system");
     None
 }
 
@@ -252,7 +320,9 @@ pub fn validate_executable_path(path: &str, expected_name: &str) -> Result<(), S
     }
 
     let path = Path::new(path);
-    let canonical = path.canonicalize().map_err(|e| format!("Invalid executable path: {}", e))?;
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("Invalid executable path: {}", e))?;
 
     // Extract the file stem (filename without extension)
     let file_stem = canonical
@@ -465,7 +535,10 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
     let mut file = match fs::File::open(&config_path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("[CONFIG] Failed to open config file: {}. Recreating with defaults.", e);
+            eprintln!(
+                "[CONFIG] Failed to open config file: {}. Recreating with defaults.",
+                e
+            );
             heal_corrupted_config(&config_path);
             return Ok(Config::default());
         }
@@ -480,7 +553,10 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
     let mut config: Config = match serde_json::from_str(&contents) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[CONFIG] Corrupted config ({:?}), backing up and recreating with defaults.", e);
+            eprintln!(
+                "[CONFIG] Corrupted config ({:?}), backing up and recreating with defaults.",
+                e
+            );
             heal_corrupted_config(&config_path);
             Config::default()
         }
@@ -704,13 +780,25 @@ mod tests {
         assert_eq!(deserialized.cloud_cache_enabled, cfg.cloud_cache_enabled);
         assert_eq!(deserialized.cloud_cache_dir, cfg.cloud_cache_dir);
         assert_eq!(deserialized.cloud_cache_max_mb, cfg.cloud_cache_max_mb);
-        assert_eq!(deserialized.cloud_cache_expiry_hours, cfg.cloud_cache_expiry_hours);
-        assert_eq!(deserialized.cloud_scan_interval_minutes, cfg.cloud_scan_interval_minutes);
+        assert_eq!(
+            deserialized.cloud_cache_expiry_hours,
+            cfg.cloud_cache_expiry_hours
+        );
+        assert_eq!(
+            deserialized.cloud_scan_interval_minutes,
+            cfg.cloud_scan_interval_minutes
+        );
         assert_eq!(deserialized.zip_indexing_enabled, cfg.zip_indexing_enabled);
         assert_eq!(deserialized.zip_cache_dir, cfg.zip_cache_dir);
         assert_eq!(deserialized.zip_cache_max_gb, cfg.zip_cache_max_gb);
-        assert_eq!(deserialized.zip_cache_expiry_days, cfg.zip_cache_expiry_days);
-        assert_eq!(deserialized.notifications_enabled, cfg.notifications_enabled);
+        assert_eq!(
+            deserialized.zip_cache_expiry_days,
+            cfg.zip_cache_expiry_days
+        );
+        assert_eq!(
+            deserialized.notifications_enabled,
+            cfg.notifications_enabled
+        );
         assert_eq!(deserialized.dev_backend_url, cfg.dev_backend_url);
         assert_eq!(deserialized.player_mode, cfg.player_mode);
         assert_eq!(deserialized.addon_url, cfg.addon_url);
@@ -859,6 +947,7 @@ mod tests {
 
     // ── find_mpv_recursive tests ──────────────────────────────────────
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn find_mpv_recursive_finds_mpv_exe_in_root() {
         let tmp = TempDir::new().unwrap();
@@ -869,6 +958,7 @@ mod tests {
         assert_eq!(found.unwrap().file_name().unwrap(), "mpv.exe");
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn find_mpv_recursive_finds_slasshyvault_mpv_exe() {
         let tmp = TempDir::new().unwrap();
@@ -879,6 +969,7 @@ mod tests {
         assert_eq!(found.unwrap().file_name().unwrap(), "slasshyvault-mpv.exe");
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn find_mpv_recursive_finds_in_subdirectory() {
         let tmp = TempDir::new().unwrap();
@@ -891,6 +982,7 @@ mod tests {
         assert!(found.unwrap().starts_with(&subdir));
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn find_mpv_recursive_case_insensitive_name() {
         let tmp = TempDir::new().unwrap();
@@ -898,6 +990,16 @@ mod tests {
         fs::write(&exe, b"fake").unwrap();
         let found = find_mpv_recursive(tmp.path());
         assert!(found.is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn find_mpv_recursive_finds_extensionless_linux_mpv() {
+        let tmp = TempDir::new().unwrap();
+        let binary = tmp.path().join("mpv");
+        fs::write(&binary, b"fake").unwrap();
+        let found = find_mpv_recursive(tmp.path());
+        assert_eq!(found.as_deref(), Some(binary.as_path()));
     }
 
     #[test]
@@ -936,6 +1038,7 @@ mod tests {
 
     // ── search_directory_for_mpv tests ────────────────────────────────
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn search_directory_for_mpv_finds_direct() {
         let tmp = TempDir::new().unwrap();
@@ -945,6 +1048,7 @@ mod tests {
         assert!(found.is_some());
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn search_directory_for_mpv_finds_in_subdirectory() {
         let tmp = TempDir::new().unwrap();
@@ -956,6 +1060,7 @@ mod tests {
         assert!(found.is_some());
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn search_directory_for_mpv_returns_none_at_zero_depth() {
         let tmp = TempDir::new().unwrap();
@@ -978,17 +1083,25 @@ mod tests {
 
     // ── expand_and_check_pattern tests ────────────────────────────────
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn expand_and_check_pattern_finds_matching_entry() {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("testuser");
         fs::create_dir(&user_dir).unwrap();
-        let mpv_dir = user_dir.join("scoop").join("apps").join("mpv").join("current");
+        let mpv_dir = user_dir
+            .join("scoop")
+            .join("apps")
+            .join("mpv")
+            .join("current");
         fs::create_dir_all(&mpv_dir).unwrap();
         let exe = mpv_dir.join("mpv.exe");
         fs::write(&exe, b"fake").unwrap();
 
-        let pattern = format!("{}\\*\\scoop\\apps\\mpv\\current\\mpv.exe", tmp.path().display());
+        let pattern = format!(
+            "{}\\*\\scoop\\apps\\mpv\\current\\mpv.exe",
+            tmp.path().display()
+        );
         let found = expand_and_check_pattern(&pattern);
         assert!(found.is_some());
     }
@@ -1093,11 +1206,19 @@ mod tests {
         assert!(!MPV_SEARCH_PATHS.is_empty());
         // All entries should contain "mpv"
         for path in MPV_SEARCH_PATHS {
-            assert!(path.to_lowercase().contains("mpv"), "Search path missing 'mpv': {}", path);
+            assert!(
+                path.to_lowercase().contains("mpv"),
+                "Search path missing 'mpv': {}",
+                path
+            );
         }
         // All entries should end with mpv.exe
         for path in MPV_SEARCH_PATHS {
-            assert!(path.ends_with("mpv.exe"), "Search path doesn't end with mpv.exe: {}", path);
+            assert!(
+                path.ends_with("mpv.exe"),
+                "Search path doesn't end with mpv.exe: {}",
+                path
+            );
         }
     }
 
@@ -1107,6 +1228,7 @@ mod tests {
     // We test the logic by checking that bundled_mpv_exists returns a bool
     // and get_bundled_mpv_path always returns a valid PathBuf.
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn get_bundled_mpv_path_always_returns_path() {
         let path = get_bundled_mpv_path();

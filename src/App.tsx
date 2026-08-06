@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, lazy, Suspense, useMemo, useCallback, startTransition } from 'react'
 import { listen, emit, UnlistenFn } from '@tauri-apps/api/event'
-import { invoke } from '@tauri-apps/api/tauri'
-import { appWindow } from '@tauri-apps/api/window'
+import { invoke } from '@tauri-apps/api/core'
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import {
   Sidebar,
   MovieCard,
@@ -109,6 +109,7 @@ import { useAutoOptimize, saveCachedLibrarySize } from '@/lib/optimization'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+const appWindow = getCurrentWebviewWindow()
 
 // Lazy load heavy components
 const loadSettingsModal = () => import('@/components/SettingsModal')

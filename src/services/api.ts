@@ -1,4 +1,4 @@
-import { invoke, convertFileSrc } from "@tauri-apps/api/tauri";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 
 // Cache for image URLs to prevent repeated IPC calls
 const imageUrlCache = new Map<string, Promise<string | null>>();

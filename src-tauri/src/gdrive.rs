@@ -12,7 +12,6 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-
 // Backend auth server URL (handles OAuth securely)
 // This keeps client_id and client_secret on the server
 const AUTH_SERVER_URL: &str = "https://slasshyvault.onrender.com";
@@ -71,11 +70,8 @@ pub struct FailedRefreshRecord {
 /// or error message containing any of these tokens (case-insensitive) is
 /// recorded into `FailedRefreshRecord`. Anything else (network errors,
 /// 5xx, timeouts) is treated as transient and only bumps the counter.
-const PERMANENT_REFRESH_ERROR_TOKENS: &[&str] = &[
-    "invalid_grant",
-    "invalid_token",
-    "unauthorized_client",
-];
+const PERMANENT_REFRESH_ERROR_TOKENS: &[&str] =
+    &["invalid_grant", "invalid_token", "unauthorized_client"];
 
 fn is_permanent_refresh_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
@@ -457,8 +453,7 @@ impl GoogleDriveClient {
         let tokens_arc: Arc<Mutex<Option<GoogleTokens>>> = Arc::clone(&self.tokens);
 
         tauri::async_runtime::spawn(async move {
-            let interval =
-                std::time::Duration::from_secs(TOKEN_REFRESH_WATCHDOG_INTERVAL_SECS);
+            let interval = std::time::Duration::from_secs(TOKEN_REFRESH_WATCHDOG_INTERVAL_SECS);
             loop {
                 tokio::time::sleep(interval).await;
 
@@ -483,8 +478,7 @@ impl GoogleDriveClient {
                     }
                 };
 
-                let Some((refresh_token, _expiry_when_tick_started)) = should_refresh_now
-                else {
+                let Some((refresh_token, _expiry_when_tick_started)) = should_refresh_now else {
                     continue;
                 };
 
@@ -503,33 +497,26 @@ impl GoogleDriveClient {
                                 if let Some(access_token) =
                                     v["access_token"].as_str().map(String::from)
                                 {
-                                    let expires_in =
-                                        v["expires_in"].as_i64().unwrap_or(3600);
-                                    let expires_at =
-                                        chrono::Utc::now().timestamp() + expires_in;
-                                    let rotated_refresh = v["refresh_token"]
-                                        .as_str()
-                                        .map(String::from);
+                                    let expires_in = v["expires_in"].as_i64().unwrap_or(3600);
+                                    let expires_at = chrono::Utc::now().timestamp() + expires_in;
+                                    let rotated_refresh =
+                                        v["refresh_token"].as_str().map(String::from);
 
-                                    let mut guard = tokens_arc
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner());
-                                    let persist_ok =
-                                        if let Some(t) = guard.as_mut() {
-                                            t.access_token = access_token;
-                                            t.expires_at = Some(expires_at);
-                                            if let Some(new_rt) = rotated_refresh {
-                                                if t.refresh_token.as_deref()
-                                                    != Some(new_rt.as_str())
-                                                {
-                                                    t.refresh_token = Some(new_rt);
-                                                    rotated = true;
-                                                }
+                                    let mut guard =
+                                        tokens_arc.lock().unwrap_or_else(|e| e.into_inner());
+                                    let persist_ok = if let Some(t) = guard.as_mut() {
+                                        t.access_token = access_token;
+                                        t.expires_at = Some(expires_at);
+                                        if let Some(new_rt) = rotated_refresh {
+                                            if t.refresh_token.as_deref() != Some(new_rt.as_str()) {
+                                                t.refresh_token = Some(new_rt);
+                                                rotated = true;
                                             }
-                                            save_tokens(t).is_ok()
-                                        } else {
-                                            true // already cleared
-                                        };
+                                        }
+                                        save_tokens(t).is_ok()
+                                    } else {
+                                        true // already cleared
+                                    };
                                     drop(guard);
                                     if !persist_ok {
                                         eprintln!(
@@ -547,19 +534,14 @@ impl GoogleDriveClient {
                             last_err = "Refresh response malformed".to_string();
                         }
                         Ok(resp) => {
-                            last_err = format!(
-                                "Refresh returned HTTP {}",
-                                resp.status().as_u16()
-                            );
+                            last_err = format!("Refresh returned HTTP {}", resp.status().as_u16());
                         }
                         Err(e) => {
                             last_err = format!("Refresh network error: {}", e);
                         }
                     }
                     if attempt + 1 < TOKEN_REFRESH_WATCHDOG_MAX_RETRIES {
-                        let backoff = std::time::Duration::from_secs(
-                            5 * (attempt as u64 + 1),
-                        );
+                        let backoff = std::time::Duration::from_secs(5 * (attempt as u64 + 1));
                         tokio::time::sleep(backoff).await;
                     }
                 }
@@ -571,10 +553,7 @@ impl GoogleDriveClient {
                             | "Refresh returned HTTP 400"
                     )
                 {
-                    eprintln!(
-                        "[GDRIVE] Watchdog refresh exhausted retries: {}",
-                        last_err
-                    );
+                    eprintln!("[GDRIVE] Watchdog refresh exhausted retries: {}", last_err);
                 }
             }
         })
@@ -693,9 +672,7 @@ impl GoogleDriveClient {
         let expires_at = chrono::Utc::now().timestamp() + expires_in;
 
         // Google occasionally rotates the refresh_token. Persist when it does.
-        let rotated_refresh_token = token_response["refresh_token"]
-            .as_str()
-            .map(String::from);
+        let rotated_refresh_token = token_response["refresh_token"].as_str().map(String::from);
 
         let mut guard = self.tokens.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = guard.as_mut() {
@@ -739,7 +716,11 @@ impl GoogleDriveClient {
     /// Revoke tokens with Google, then clear local state (logout)
     pub async fn revoke_and_clear_tokens(&self) -> Result<(), String> {
         // Try to revoke the refresh token first (more important to revoke)
-        let tokens_snapshot = self.tokens.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let tokens_snapshot = self
+            .tokens
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         if let Some(ref t) = tokens_snapshot {
             let token_to_revoke = t.refresh_token.as_deref().unwrap_or(&t.access_token);
             let _ = self
@@ -929,7 +910,6 @@ impl GoogleDriveClient {
 
         Ok(all_files)
     }
-
 
     /// Get a streaming URL for a file (with auth header)
     pub async fn get_stream_url(&self, file_id: &str) -> Result<(String, String), String> {
@@ -1310,7 +1290,10 @@ impl GoogleDriveClient {
     pub async fn get_changes_start_token(&self) -> Result<String, String> {
         let access_token = self.get_access_token().await?;
 
-        let url = format!("{}/changes/startPageToken?supportsAllDrives=true&includeItemsFromAllDrives=true", DRIVE_API_BASE);
+        let url = format!(
+            "{}/changes/startPageToken?supportsAllDrives=true&includeItemsFromAllDrives=true",
+            DRIVE_API_BASE
+        );
 
         let response = self
             .http_client
@@ -1410,7 +1393,10 @@ impl GoogleDriveClient {
 
     /// Recursively list all descendant folder IDs under a given parent folder.
     /// This is used to determine which files belong to tracked folders (including subfolders).
-    pub async fn list_all_folder_ids(&self, folder_id: &str) -> Result<std::collections::HashSet<String>, String> {
+    pub async fn list_all_folder_ids(
+        &self,
+        folder_id: &str,
+    ) -> Result<std::collections::HashSet<String>, String> {
         let access_token = self.get_access_token().await?;
         let mut all_ids = std::collections::HashSet::new();
         let mut page_token: Option<String> = None;
@@ -1437,7 +1423,10 @@ impl GoogleDriveClient {
 
             if !response.status().is_success() {
                 let error_text = response.text().await.unwrap_or_default();
-                return Err(format!("Drive API error listing subfolders: {}", error_text));
+                return Err(format!(
+                    "Drive API error listing subfolders: {}",
+                    error_text
+                ));
             }
 
             let result: serde_json::Value = response
@@ -1455,7 +1444,9 @@ impl GoogleDriveClient {
                                     all_ids.extend(descendant_ids);
                                 }
                                 Err(e) => {
-                                    println!("[GDRIVE] Warning: failed to list subfolders for {id}: {e}");
+                                    println!(
+                                        "[GDRIVE] Warning: failed to list subfolders for {id}: {e}"
+                                    );
                                 }
                             }
                         }
@@ -1474,7 +1465,10 @@ impl GoogleDriveClient {
 
     /// Checks if multiple files exist on Google Drive. Returns a set of file_ids that DO exist.
     /// Uses concurrent individual requests (Drive API has no batch-exists endpoint).
-    pub async fn batch_check_file_exists(&self, file_ids: &[String]) -> Result<std::collections::HashSet<String>, String> {
+    pub async fn batch_check_file_exists(
+        &self,
+        file_ids: &[String],
+    ) -> Result<std::collections::HashSet<String>, String> {
         use std::collections::HashSet;
         use tokio::task::JoinSet;
 
@@ -1517,7 +1511,11 @@ impl GoogleDriveClient {
 
 /// Generate the OAuth authorization URL (via backend proxy), with a CSRF nonce
 pub fn get_auth_url_with_nonce(nonce: &str) -> String {
-    format!("{}/auth/google?nonce={}", get_auth_server_url(), urlencoding::encode(nonce))
+    format!(
+        "{}/auth/google?nonce={}",
+        get_auth_server_url(),
+        urlencoding::encode(nonce)
+    )
 }
 
 /// Bind the OAuth callback listener BEFORE opening the browser
@@ -1599,7 +1597,8 @@ pub async fn wait_for_oauth_callback_with_nonce(
 
     // Helper: error HTML page (SlasshyVault dark glassmorphism aesthetic)
     let error_page = |title: &str, message: &str| -> String {
-        format!(r#"<!DOCTYPE html>
+        format!(
+            r#"<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>SlasshyVault - {}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
@@ -1638,7 +1637,9 @@ pub async fn wait_for_oauth_callback_with_nonce(
     <p class="hint">You can close this window and try again.</p>
   </div>
   <div class="logo">SlasshyVault</div>
-</body></html>"#, title, title, message)
+</body></html>"#,
+            title, title, message
+        )
     };
 
     // Helper: success HTML page (SlasshyVault dark glassmorphism aesthetic)
@@ -1714,7 +1715,11 @@ pub async fn wait_for_oauth_callback_with_nonce(
     let path = match request_line.split_whitespace().nth(1) {
         Some(p) => p,
         None => {
-            send_http(&mut stream, "400 Bad Request", &error_page("Invalid Request", "Could not parse request path."));
+            send_http(
+                &mut stream,
+                "400 Bad Request",
+                &error_page("Invalid Request", "Could not parse request path."),
+            );
             return Err("Invalid request line".to_string());
         }
     };
@@ -1724,7 +1729,11 @@ pub async fn wait_for_oauth_callback_with_nonce(
         let query_start = match path.find('?') {
             Some(qs) => qs,
             None => {
-                send_http(&mut stream, "400 Bad Request", &error_page("Invalid Callback", "Error present but no query string."));
+                send_http(
+                    &mut stream,
+                    "400 Bad Request",
+                    &error_page("Invalid Callback", "Error present but no query string."),
+                );
                 return Err("No query string".to_string());
             }
         };
@@ -1739,14 +1748,25 @@ pub async fn wait_for_oauth_callback_with_nonce(
 
         let error = params.get("error").unwrap_or(&"unknown_error");
         println!("[GDRIVE] OAuth error from backend: {}", error);
-        send_http(&mut stream, "400 Bad Request", &error_page("OAuth Error", &format!("The authentication server returned an error: {}", error)));
+        send_http(
+            &mut stream,
+            "400 Bad Request",
+            &error_page(
+                "OAuth Error",
+                &format!("The authentication server returned an error: {}", error),
+            ),
+        );
         return Err(format!("OAuth error: {}", error));
     }
 
     let query_start = match path.find('?') {
         Some(qs) => qs,
         None => {
-            send_http(&mut stream, "400 Bad Request", &error_page("Invalid Callback", "No query string in callback URL."));
+            send_http(
+                &mut stream,
+                "400 Bad Request",
+                &error_page("Invalid Callback", "No query string in callback URL."),
+            );
             return Err("No query string in callback URL".to_string());
         }
     };
@@ -1768,9 +1788,21 @@ pub async fn wait_for_oauth_callback_with_nonce(
                 println!("[GDRIVE] CSRF nonce verified OK");
             }
             Some(received) => {
-                println!("[GDRIVE] CSRF nonce mismatch: expected={}, received={}", expected, received);
-                send_http(&mut stream, "403 Forbidden", &error_page("Security Error", "Nonce mismatch — this login attempt may have been tampered with."));
-                return Err("CSRF nonce mismatch — possible OAuth session fixation attack".to_string());
+                println!(
+                    "[GDRIVE] CSRF nonce mismatch: expected={}, received={}",
+                    expected, received
+                );
+                send_http(
+                    &mut stream,
+                    "403 Forbidden",
+                    &error_page(
+                        "Security Error",
+                        "Nonce mismatch — this login attempt may have been tampered with.",
+                    ),
+                );
+                return Err(
+                    "CSRF nonce mismatch — possible OAuth session fixation attack".to_string(),
+                );
             }
             None => {
                 // Backend doesn't support nonces yet (old deployment) — warn but allow
@@ -1793,13 +1825,24 @@ pub async fn wait_for_oauth_callback_with_nonce(
                 Err(e) => {
                     let msg = format!("Failed to fetch session tokens: {}", e);
                     println!("[GDRIVE] {}", msg);
-                    send_http(&mut stream, "502 Bad Gateway", &error_page("Token Fetch Failed", "Could not reach the authentication server to retrieve tokens."));
+                    send_http(
+                        &mut stream,
+                        "502 Bad Gateway",
+                        &error_page(
+                            "Token Fetch Failed",
+                            "Could not reach the authentication server to retrieve tokens.",
+                        ),
+                    );
                     return Err(msg);
                 }
             },
             Err(e) => {
                 let msg = format!("Failed to build HTTP client: {}", e);
-                send_http(&mut stream, "500 Internal Server Error", &error_page("Internal Error", "Failed to create HTTP client."));
+                send_http(
+                    &mut stream,
+                    "500 Internal Server Error",
+                    &error_page("Internal Error", "Failed to create HTTP client."),
+                );
                 return Err(msg);
             }
         };
@@ -1809,7 +1852,14 @@ pub async fn wait_for_oauth_callback_with_nonce(
             let error_text = response.text().await.unwrap_or_default();
             let msg = format!("Session token fetch failed ({}): {}", status, error_text);
             println!("[GDRIVE] {}", msg);
-            send_http(&mut stream, "502 Bad Gateway", &error_page("Token Fetch Failed", &format!("Server returned an error. Session may have expired.")));
+            send_http(
+                &mut stream,
+                "502 Bad Gateway",
+                &error_page(
+                    "Token Fetch Failed",
+                    &format!("Server returned an error. Session may have expired."),
+                ),
+            );
             return Err(msg);
         }
 
@@ -1818,7 +1868,14 @@ pub async fn wait_for_oauth_callback_with_nonce(
             Err(e) => {
                 let msg = format!("Failed to parse session tokens: {}", e);
                 println!("[GDRIVE] {}", msg);
-                send_http(&mut stream, "502 Bad Gateway", &error_page("Token Parse Error", "Received invalid token data from the authentication server."));
+                send_http(
+                    &mut stream,
+                    "502 Bad Gateway",
+                    &error_page(
+                        "Token Parse Error",
+                        "Received invalid token data from the authentication server.",
+                    ),
+                );
                 return Err(msg);
             }
         };
@@ -1826,7 +1883,11 @@ pub async fn wait_for_oauth_callback_with_nonce(
         let access_token = match token_data["access_token"].as_str() {
             Some(t) => t.to_string(),
             None => {
-                send_http(&mut stream, "502 Bad Gateway", &error_page("Token Error", "Server response missing access token."));
+                send_http(
+                    &mut stream,
+                    "502 Bad Gateway",
+                    &error_page("Token Error", "Server response missing access token."),
+                );
                 return Err("Missing access_token".to_string());
             }
         };
@@ -1856,12 +1917,20 @@ pub async fn wait_for_oauth_callback_with_nonce(
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(s) => s,
                 Err(e) => {
-                    send_http(&mut stream, "400 Bad Request", &error_page("Token Error", "Invalid token encoding."));
+                    send_http(
+                        &mut stream,
+                        "400 Bad Request",
+                        &error_page("Token Error", "Invalid token encoding."),
+                    );
                     return Err(format!("Invalid UTF-8 in tokens: {}", e));
                 }
             },
             Err(e) => {
-                send_http(&mut stream, "400 Bad Request", &error_page("Token Error", "Could not decode token data."));
+                send_http(
+                    &mut stream,
+                    "400 Bad Request",
+                    &error_page("Token Error", "Could not decode token data."),
+                );
                 return Err(format!("Failed to decode tokens: {}", e));
             }
         };
@@ -1869,7 +1938,11 @@ pub async fn wait_for_oauth_callback_with_nonce(
         let token_data: serde_json::Value = match serde_json::from_str(&tokens_json) {
             Ok(data) => data,
             Err(e) => {
-                send_http(&mut stream, "400 Bad Request", &error_page("Token Error", "Invalid token JSON."));
+                send_http(
+                    &mut stream,
+                    "400 Bad Request",
+                    &error_page("Token Error", "Invalid token JSON."),
+                );
                 return Err(format!("Failed to parse tokens JSON: {}", e));
             }
         };
@@ -1877,7 +1950,11 @@ pub async fn wait_for_oauth_callback_with_nonce(
         let access_token = match token_data["access_token"].as_str() {
             Some(t) => t.to_string(),
             None => {
-                send_http(&mut stream, "400 Bad Request", &error_page("Token Error", "Token data missing access token."));
+                send_http(
+                    &mut stream,
+                    "400 Bad Request",
+                    &error_page("Token Error", "Token data missing access token."),
+                );
                 return Err("Missing access_token".to_string());
             }
         };
@@ -1899,7 +1976,14 @@ pub async fn wait_for_oauth_callback_with_nonce(
             token_type,
         }
     } else {
-        send_http(&mut stream, "400 Bad Request", &error_page("Invalid Callback", "No session_id or tokens in callback URL."));
+        send_http(
+            &mut stream,
+            "400 Bad Request",
+            &error_page(
+                "Invalid Callback",
+                "No session_id or tokens in callback URL.",
+            ),
+        );
         return Err("No session_id or tokens in callback URL".to_string());
     };
 
@@ -1923,15 +2007,16 @@ fn obfuscate(data: &str) -> String {
     use rand::RngCore;
 
     let key = derive_encryption_key();
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .expect("AES-256-GCM key should always be 32 bytes");
+    let cipher =
+        Aes256Gcm::new_from_slice(&key).expect("AES-256-GCM key should always be 32 bytes");
 
     // Generate a random 12-byte nonce
     let mut nonce_bytes = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
-    let ciphertext = cipher.encrypt(nonce, data.as_bytes())
+    let ciphertext = cipher
+        .encrypt(nonce, data.as_bytes())
         .expect("Encryption should not fail for valid inputs");
 
     // Prepend nonce to ciphertext so we can extract it during decryption
@@ -1961,7 +2046,9 @@ fn deobfuscate_aes(data: &str) -> Result<String, String> {
     use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
-    let decoded = BASE64.decode(data).map_err(|e| format!("Base64 decode failed: {}", e))?;
+    let decoded = BASE64
+        .decode(data)
+        .map_err(|e| format!("Base64 decode failed: {}", e))?;
 
     // Minimum size: 12 bytes nonce + 16 bytes auth tag + at least 1 byte ciphertext
     if decoded.len() < 29 {
@@ -1973,8 +2060,8 @@ fn deobfuscate_aes(data: &str) -> Result<String, String> {
 
     // Try current key first, then legacy key for backward compatibility
     for key in [derive_encryption_key(), derive_legacy_encryption_key()] {
-        let cipher = Aes256Gcm::new_from_slice(&key)
-            .expect("AES-256-GCM key should always be 32 bytes");
+        let cipher =
+            Aes256Gcm::new_from_slice(&key).expect("AES-256-GCM key should always be 32 bytes");
 
         if let Ok(plaintext) = cipher.decrypt(nonce, ciphertext) {
             if let Ok(result) = String::from_utf8(plaintext) {
@@ -2085,8 +2172,8 @@ fn load_tokens() -> Result<GoogleTokens, String> {
     let is_legacy = deobfuscate_aes(&encoded).is_err();
 
     let json = deobfuscate(&encoded)?;
-    let tokens: GoogleTokens = serde_json::from_str(&json)
-        .map_err(|e| format!("Failed to parse tokens: {}", e))?;
+    let tokens: GoogleTokens =
+        serde_json::from_str(&json).map_err(|e| format!("Failed to parse tokens: {}", e))?;
 
     // Transparently re-encrypt legacy tokens so the file is upgraded in place
     if is_legacy {
@@ -2459,10 +2546,7 @@ mod tests {
             deserialized.modified_time,
             Some("2024-01-15T10:30:00.000Z".to_string())
         );
-        assert_eq!(
-            deserialized.parents,
-            Some(vec!["parent1".to_string()])
-        );
+        assert_eq!(deserialized.parents, Some(vec!["parent1".to_string()]));
         assert_eq!(
             deserialized.web_content_link,
             Some("https://drive.google.com/uc?id=abc123".to_string())
@@ -2519,7 +2603,10 @@ mod tests {
         let item: DriveItem = serde_json::from_str(json).unwrap();
         assert_eq!(item.mime_type, "video/mp4");
         assert_eq!(item.modified_time.as_deref(), Some("2024-01-01T00:00:00Z"));
-        assert_eq!(item.web_content_link.as_deref(), Some("https://example.com"));
+        assert_eq!(
+            item.web_content_link.as_deref(),
+            Some("https://example.com")
+        );
     }
 
     // ==================== GoogleTokens serialization ====================
@@ -2831,7 +2918,10 @@ mod tests {
 
     #[test]
     fn watch_history_file_name() {
-        assert_eq!(WATCH_HISTORY_FILE_NAME, "slasshyvault_watch_history_v1.json");
+        assert_eq!(
+            WATCH_HISTORY_FILE_NAME,
+            "slasshyvault_watch_history_v1.json"
+        );
     }
 
     #[test]
@@ -3136,7 +3226,8 @@ mod tests {
     #[tokio::test]
     async fn get_access_token_valid() {
         let future = chrono::Utc::now().timestamp() + 3600;
-        let client = make_client_with_tokens(Some(make_tokens("my-access-token", None, Some(future))));
+        let client =
+            make_client_with_tokens(Some(make_tokens("my-access-token", None, Some(future))));
         let result = client.get_access_token().await;
         assert_eq!(result.unwrap(), "my-access-token");
     }
@@ -3153,10 +3244,16 @@ mod tests {
         let past = chrono::Utc::now().timestamp() - 100;
         let client = make_client_with_tokens(Some(make_tokens("expired", None, Some(past))));
         let result = client.get_access_token().await;
-        assert!(result.is_err(), "expected error for expired token without refresh: {:?}", result);
         assert!(
-            result.as_ref().err().unwrap().contains("refresh") || result.as_ref().err().unwrap().contains("expired"),
-            "expected error mentioning refresh/expiry: {:?}", result
+            result.is_err(),
+            "expected error for expired token without refresh: {:?}",
+            result
+        );
+        assert!(
+            result.as_ref().err().unwrap().contains("refresh")
+                || result.as_ref().err().unwrap().contains("expired"),
+            "expected error mentioning refresh/expiry: {:?}",
+            result
         );
     }
 
@@ -3196,18 +3293,26 @@ mod tests {
     #[tokio::test]
     async fn save_watch_history_invalid_json() {
         let client = make_client_with_tokens(Some(make_tokens("at", None, None)));
-        let result = client.save_watch_history_snapshot("not valid json {{{").await;
+        let result = client
+            .save_watch_history_snapshot("not valid json {{{")
+            .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Invalid watch history snapshot JSON"));
+        assert!(result
+            .unwrap_err()
+            .contains("Invalid watch history snapshot JSON"));
     }
 
     #[tokio::test]
     async fn save_watch_history_valid_json_no_validation_error() {
         let client = make_client_with_tokens(Some(make_tokens("at", None, None)));
-        let result = client.save_watch_history_snapshot(r#"{"key":"value"}"#).await;
+        let result = client
+            .save_watch_history_snapshot(r#"{"key":"value"}"#)
+            .await;
         assert!(result.is_err());
         // Error should NOT be a JSON validation error — it should reach the network call
-        assert!(!result.unwrap_err().contains("Invalid watch history snapshot JSON"));
+        assert!(!result
+            .unwrap_err()
+            .contains("Invalid watch history snapshot JSON"));
     }
 
     // ==================== save_watchlist_snapshot JSON validation ====================
@@ -3217,7 +3322,9 @@ mod tests {
         let client = make_client_with_tokens(Some(make_tokens("at", None, None)));
         let result = client.save_watchlist_snapshot("{bad json").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Invalid watchlist snapshot JSON"));
+        assert!(result
+            .unwrap_err()
+            .contains("Invalid watchlist snapshot JSON"));
     }
 
     #[tokio::test]
@@ -3226,7 +3333,9 @@ mod tests {
         let result = client.save_watchlist_snapshot(r#"{"items":[]}"#).await;
         assert!(result.is_err());
         // Error should NOT be a JSON validation error — it should reach the network call
-        assert!(!result.unwrap_err().contains("Invalid watchlist snapshot JSON"));
+        assert!(!result
+            .unwrap_err()
+            .contains("Invalid watchlist snapshot JSON"));
     }
 
     // ==================== API methods error paths (no valid token) ====================
@@ -3304,7 +3413,9 @@ mod tests {
     #[tokio::test]
     async fn create_permission_not_authenticated() {
         let client = make_client_with_tokens(None);
-        let result = client.create_permission("file123", "user@example.com", "reader").await;
+        let result = client
+            .create_permission("file123", "user@example.com", "reader")
+            .await;
         assert!(result.is_err());
     }
 
@@ -3336,7 +3447,11 @@ mod tests {
         let past = chrono::Utc::now().timestamp() - 3600;
         let client = make_client_with_tokens(Some(make_tokens("expired", None, Some(past))));
         let result = client.list_files(None, None).await;
-        assert!(result.is_err(), "expected error for expired token without refresh: {:?}", result);
+        assert!(
+            result.is_err(),
+            "expected error for expired token without refresh: {:?}",
+            result
+        );
     }
 
     #[tokio::test]
@@ -3731,8 +3846,7 @@ mod tests {
     #[test]
     fn refresh_buffer_is_ten_minutes() {
         assert_eq!(
-            TOKEN_REFRESH_BUFFER_SECS,
-            600,
+            TOKEN_REFRESH_BUFFER_SECS, 600,
             "refresh buffer must be 10 minutes — guards against token expiry \
              during long playback. Do not shrink without re-tuning the \
              background watchdog interval."
@@ -3875,7 +3989,10 @@ mod tests {
                 .wrapping_mul(i as u8 + 1);
         }
         let key = derive_legacy_encryption_key();
-        assert_eq!(key, legacy_key, "legacy key derivation must match v3.0.48 chain");
+        assert_eq!(
+            key, legacy_key,
+            "legacy key derivation must match v3.0.48 chain"
+        );
 
         let plaintext = r#"{"access_token":"old_at","refresh_token":"old_rt","expires_at":1700000000,"token_type":"Bearer"}"#;
         let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
@@ -3915,7 +4032,9 @@ mod tests {
     #[test]
     fn permanent_error_patterns_are_classified() {
         assert!(is_permanent_refresh_error("invalid_grant"));
-        assert!(is_permanent_refresh_error("returned INVALID_GRANT from server"));
+        assert!(is_permanent_refresh_error(
+            "returned INVALID_GRANT from server"
+        ));
         assert!(is_permanent_refresh_error("invalid_token"));
         assert!(!is_permanent_refresh_error("connection reset by peer"));
         assert!(!is_permanent_refresh_error(""));
@@ -3930,7 +4049,10 @@ mod tests {
         assert_eq!(rec.consecutive_failures, 1);
 
         rec.record(&Err("{\"error\":\"invalid_grant\"}".into()));
-        assert_eq!(rec.last_error.as_deref(), Some("{\"error\":\"invalid_grant\"}"));
+        assert_eq!(
+            rec.last_error.as_deref(),
+            Some("{\"error\":\"invalid_grant\"}")
+        );
         assert!(rec.last_failed_at.is_some());
         assert_eq!(rec.consecutive_failures, 2);
 
@@ -3960,10 +4082,7 @@ mod tests {
         let status = client.get_auth_status();
         assert!(!status.has_refresh_token);
         assert!(!status.has_access_token);
-        assert_eq!(
-            status.last_refresh_error.as_deref(),
-            Some("invalid_grant")
-        );
+        assert_eq!(status.last_refresh_error.as_deref(), Some("invalid_grant"));
         assert_eq!(status.consecutive_failures, 1);
         assert!(status.last_refresh_failed_at.is_some());
     }

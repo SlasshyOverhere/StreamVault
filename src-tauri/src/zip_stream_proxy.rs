@@ -395,9 +395,8 @@ impl TurboProxyState {
             Err(error) => {
                 if matches!(error.kind, FetchErrorKind::RateLimited) {
                     inner.max_parallel = 1;
-                    inner.paused_until = Some(
-                        Instant::now() + Duration::from_secs(TURBO_RATE_LIMIT_BACKOFF_SECS),
-                    );
+                    inner.paused_until =
+                        Some(Instant::now() + Duration::from_secs(TURBO_RATE_LIMIT_BACKOFF_SECS));
                 } else if inner.max_parallel > TURBO_MIN_CONNECTIONS {
                     inner.max_parallel -= 1;
                 }
@@ -405,7 +404,11 @@ impl TurboProxyState {
                 // This prevents unbounded accumulation of failed entries and allows
                 // the chunk to be re-fetched on next request.
                 inner.chunks.remove(&chunk_index);
-                dev_elog!("[ZIP PROXY] Chunk {} fetch failed (removed from cache): {}", chunk_index, error.message);
+                dev_elog!(
+                    "[ZIP PROXY] Chunk {} fetch failed (removed from cache): {}",
+                    chunk_index,
+                    error.message
+                );
             }
         }
 
@@ -440,12 +443,11 @@ impl TurboProxyState {
                 message: error,
                 kind: FetchErrorKind::Fatal,
             })?;
-            let access_token = resolve_access_token(&self.spec, &auth_runtime).map_err(|error| {
-                FetchError {
+            let access_token =
+                resolve_access_token(&self.spec, &auth_runtime).map_err(|error| FetchError {
                     message: error,
                     kind: FetchErrorKind::Fatal,
-                }
-            })?;
+                })?;
 
             let mut request = client
                 .get(&self.spec.drive_url)
@@ -465,7 +467,10 @@ impl TurboProxyState {
                     }
 
                     let response = response.error_for_status().map_err(|error| FetchError {
-                        message: format!("Upstream request failed for chunk {}: {}", chunk_index, error),
+                        message: format!(
+                            "Upstream request failed for chunk {}: {}",
+                            chunk_index, error
+                        ),
                         kind: if attempt + 1 == TURBO_FETCH_RETRIES {
                             FetchErrorKind::Fatal
                         } else {
@@ -507,9 +512,7 @@ impl TurboProxyState {
                         return Err(FetchError {
                             message: format!(
                                 "Failed to fetch chunk {} after {} attempts: {}",
-                                chunk_index,
-                                TURBO_FETCH_RETRIES,
-                                error
+                                chunk_index, TURBO_FETCH_RETRIES, error
                             ),
                             kind,
                         });
@@ -545,7 +548,9 @@ impl TurboProxyState {
                 inner.contiguous_prefix_bytes,
                 bytes.as_slice(),
             )?;
-            inner.contiguous_prefix_bytes = inner.contiguous_prefix_bytes.saturating_add(bytes.len() as u64);
+            inner.contiguous_prefix_bytes = inner
+                .contiguous_prefix_bytes
+                .saturating_add(bytes.len() as u64);
         }
 
         if inner.contiguous_prefix_bytes >= self.total_length {
@@ -553,7 +558,10 @@ impl TurboProxyState {
                 &self.cache_spec.cache_paths,
                 &self.cache_spec.cache_config,
             ) {
-                dev_elog!("[ZIP PROXY] Failed to finalize turbo cache target: {:?}", error);
+                dev_elog!(
+                    "[ZIP PROXY] Failed to finalize turbo cache target: {:?}",
+                    error
+                );
             }
         }
 
@@ -579,8 +587,13 @@ impl TurboProxyState {
                 error
             )
         })?;
-        file.seek(SeekFrom::Start(chunk_start))
-            .map_err(|error| format!("Failed to seek cache file '{}': {}", cache_path.display(), error))?;
+        file.seek(SeekFrom::Start(chunk_start)).map_err(|error| {
+            format!(
+                "Failed to seek cache file '{}': {}",
+                cache_path.display(),
+                error
+            )
+        })?;
         let mut buffer = vec![0u8; expected_len];
         file.read_exact(&mut buffer)
             .map_err(|error| format!("Failed to read cache chunk {}: {}", chunk_index, error))?;
@@ -589,7 +602,10 @@ impl TurboProxyState {
 
     fn chunk_relative_bounds(&self, chunk_index: u64) -> (u64, u64) {
         let start = chunk_index.saturating_mul(TURBO_CHUNK_BYTES);
-        let end = start.saturating_add(TURBO_CHUNK_BYTES).saturating_sub(1).min(self.total_length.saturating_sub(1));
+        let end = start
+            .saturating_add(TURBO_CHUNK_BYTES)
+            .saturating_sub(1)
+            .min(self.total_length.saturating_sub(1));
         (start, end)
     }
 }
@@ -608,7 +624,8 @@ impl TurboProxyInner {
             _ => 0,
         };
 
-        self.chunks.insert(chunk_index, ChunkState::Ready(bytes.clone()));
+        self.chunks
+            .insert(chunk_index, ChunkState::Ready(bytes.clone()));
         self.hot_bytes = self.hot_bytes.saturating_sub(previous_len);
         self.hot_bytes = self.hot_bytes.saturating_add(bytes.len() as u64);
         self.touch_hot(chunk_index);
@@ -743,10 +760,9 @@ pub fn start_proxy(spec: ProxyStreamSpec) -> Result<ZipStreamProxyHandle, String
                             let (request, error) = *error;
                             eprintln!("[ZIP PROXY] Request failed: {}", error);
                             if let Some(request) = request {
-                                if let Err(response_error) = respond_with_internal_error(
-                                    request,
-                                    "ZIP proxy request failed",
-                                ) {
+                                if let Err(response_error) =
+                                    respond_with_internal_error(request, "ZIP proxy request failed")
+                                {
                                     eprintln!(
                                         "[ZIP PROXY] Failed to send 500 response: {}",
                                         response_error
@@ -814,12 +830,7 @@ fn handle_request(
         .byte_end
         .checked_sub(spec.byte_start)
         .and_then(|value| value.checked_add(1))
-        .ok_or_else(|| {
-            (
-                request.take(),
-                "Invalid ZIP byte range".to_string(),
-            )
-        })?;
+        .ok_or_else(|| (request.take(), "Invalid ZIP byte range".to_string()))?;
 
     let requested_range = match extract_range_header(
         request
@@ -829,11 +840,10 @@ fn handle_request(
     ) {
         Ok(range) => range,
         Err(error) => {
-            let response = Response::empty(StatusCode(416)).with_header(make_header(
-                "Content-Range",
-                &format!("bytes */{}", episode_length),
-            )
-            .map_err(|header_error| (request.take(), header_error))?);
+            let response = Response::empty(StatusCode(416)).with_header(
+                make_header("Content-Range", &format!("bytes */{}", episode_length))
+                    .map_err(|header_error| (request.take(), header_error))?,
+            );
             request
                 .take()
                 .expect("request should be present before responding")
@@ -929,8 +939,8 @@ fn handle_request(
 
     let upstream_start = spec.byte_start + relative_start;
     let upstream_end = spec.byte_start + relative_end;
-    let access_token = resolve_access_token(spec, auth_runtime)
-        .map_err(|error| (request.take(), error))?;
+    let access_token =
+        resolve_access_token(spec, auth_runtime).map_err(|error| (request.take(), error))?;
     let mut req = client
         .get(&spec.drive_url)
         .header(RANGE, format!("bytes={}-{}", upstream_start, upstream_end));
@@ -940,7 +950,12 @@ fn handle_request(
     let upstream = req
         .send()
         .and_then(|response| response.error_for_status())
-        .map_err(|error| (request.take(), format!("Upstream request failed: {}", error)))?;
+        .map_err(|error| {
+            (
+                request.take(),
+                format!("Upstream request failed: {}", error),
+            )
+        })?;
 
     let response = Response::new(
         StatusCode(response_status),
@@ -976,7 +991,9 @@ fn existing_prefix_len(cache_spec: &ProxyCacheSpec) -> u64 {
     }
 
     match fs::metadata(&cache_spec.cache_paths.temp_path) {
-        Ok(metadata) if metadata.is_file() => metadata.len().min(cache_spec.cache_paths.expected_size),
+        Ok(metadata) if metadata.is_file() => {
+            metadata.len().min(cache_spec.cache_paths.expected_size)
+        }
         _ => 0,
     }
 }
@@ -1252,7 +1269,10 @@ mod tests {
     fn proxy_cache_spec_clone() {
         let spec = dummy_cache_spec();
         let cloned = spec.clone();
-        assert_eq!(spec.cache_paths.expected_size, cloned.cache_paths.expected_size);
+        assert_eq!(
+            spec.cache_paths.expected_size,
+            cloned.cache_paths.expected_size
+        );
         assert_eq!(spec.start_delay_ms, cloned.start_delay_ms);
     }
 
@@ -1324,7 +1344,10 @@ mod tests {
             Some(cache),
         );
         assert!(spec.cache_spec.is_some());
-        assert_eq!(spec.cache_spec.as_ref().unwrap().cache_paths.expected_size, 1024);
+        assert_eq!(
+            spec.cache_spec.as_ref().unwrap().cache_paths.expected_size,
+            1024
+        );
     }
 
     #[test]
@@ -1707,7 +1730,11 @@ mod tests {
             Some(cache),
         );
         let result = start_proxy(spec);
-        assert!(result.is_ok(), "start_proxy with cache failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "start_proxy with cache failed: {:?}",
+            result.err()
+        );
         let mut handle = result.unwrap();
         assert!(handle.port > 0);
         handle.stop();
@@ -1724,7 +1751,11 @@ mod tests {
             None,
         );
         let result = start_proxy(spec);
-        assert!(result.is_ok(), "start_proxy with gdrive failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "start_proxy with gdrive failed: {:?}",
+            result.err()
+        );
         let mut handle = result.unwrap();
         assert!(handle.port > 0);
         handle.stop();
@@ -1922,7 +1953,11 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let result = TurboProxyState::new(spec, cache, stop);
         match result {
-            Err(msg) => assert!(msg.contains("Invalid ZIP byte range"), "unexpected error: {}", msg),
+            Err(msg) => assert!(
+                msg.contains("Invalid ZIP byte range"),
+                "unexpected error: {}",
+                msg
+            ),
             Ok(_) => panic!("expected error for invalid byte range"),
         }
     }
@@ -2057,7 +2092,11 @@ mod tests {
         // Evict with a very small limit
         inner.evict_hot_if_needed(500, prefix);
         // All chunks should be evicted (each 1024 bytes, limit is 500)
-        assert!(inner.hot_bytes <= 500, "expected <=500, got {}", inner.hot_bytes);
+        assert!(
+            inner.hot_bytes <= 500,
+            "expected <=500, got {}",
+            inner.hot_bytes
+        );
     }
 
     // ── FetchErrorKind ───────────────────────────────────────────────

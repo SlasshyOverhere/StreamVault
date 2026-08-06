@@ -11,9 +11,13 @@ const AUTO_MARK_WATCHED_THRESHOLD_RATIO: f64 = 0.93;
 
 /// Calculate dynamic demuxer cache size for a given target buffer duration.
 /// Falls back to 200 MiB if file size or duration is unknown.
-pub(crate) fn calculate_dynamic_demuxer_bytes(file_size_bytes: Option<i64>, duration_seconds: Option<f64>, target_secs: f64) -> String {
-    const MIN_BYTES: u64 = 50 * 1024 * 1024;       // 50 MiB floor
-    const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;  // 2 GiB ceiling
+pub(crate) fn calculate_dynamic_demuxer_bytes(
+    file_size_bytes: Option<i64>,
+    duration_seconds: Option<f64>,
+    target_secs: f64,
+) -> String {
+    const MIN_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB floor
+    const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB ceiling
     const FALLBACK: &str = "200MiB";
 
     let (Some(size), Some(duration)) = (file_size_bytes, duration_seconds) else {
@@ -324,8 +328,8 @@ pub fn launch_mpv_with_tracking(
     };
     let is_local_zip_proxy =
         actual_source.starts_with("http://127.0.0.1:") && actual_source.ends_with("/stream");
-    let is_local_url_proxy =
-        actual_source.starts_with("http://127.0.0.1:") || actual_source.starts_with("http://localhost:");
+    let is_local_url_proxy = actual_source.starts_with("http://127.0.0.1:")
+        || actual_source.starts_with("http://localhost:");
 
     // Create the Lua tracking script
     let script_path = create_lua_script(media_id)?;
@@ -403,20 +407,17 @@ pub fn launch_mpv_with_tracking(
     if let Some(sub_path) = subtitle_file_path.filter(|v| !v.trim().is_empty()) {
         let trimmed = sub_path.trim();
         // Validate path characters (alphanumeric, slash, backslash, dot, hyphen, underscore, colon, space, percent)
-        if trimmed
-            .chars()
-            .all(|c| {
-                c.is_ascii_alphanumeric()
-                    || c == '/'
-                    || c == '\\'
-                    || c == '.'
-                    || c == '-'
-                    || c == '_'
-                    || c == ':'
-                    || c == ' '
-                    || c == '%'
-            })
-        {
+        if trimmed.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || c == '/'
+                || c == '\\'
+                || c == '.'
+                || c == '-'
+                || c == '_'
+                || c == ':'
+                || c == ' '
+                || c == '%'
+        }) {
             cmd.arg(format!("--sub-file={}", trimmed));
         } else {
             println!("[MPV] Security warning: Rejected invalid subtitle file path");
@@ -443,7 +444,7 @@ pub fn launch_mpv_with_tracking(
     }
 
     // Add HTTP headers for cloud streaming (Google Drive auth) - only if streaming from URL.
-// MPV reliably applies the inline form here; the temp header file path was not being honored.
+    // MPV reliably applies the inline form here; the temp header file path was not being honored.
     if !use_cached {
         if let Some(header) = auth_header {
             cmd.arg(format!("--http-header-fields={}", header));
@@ -491,7 +492,10 @@ pub fn launch_mpv_with_tracking(
                         cache.max_size_mb
                     );
                 } else {
-                    println!("[MPV] Warning: Failed to create cache dir: {}", media_cache_dir.display());
+                    println!(
+                        "[MPV] Warning: Failed to create cache dir: {}",
+                        media_cache_dir.display()
+                    );
                 }
             }
         }
@@ -499,17 +503,18 @@ pub fn launch_mpv_with_tracking(
         // Always set cache options for URL sources
         cmd.arg("--cache=yes");
         if is_local_zip_proxy {
-            let dynamic_bytes = calculate_dynamic_demuxer_bytes(file_size_bytes, duration_seconds, 120.0);
+            let dynamic_bytes =
+                calculate_dynamic_demuxer_bytes(file_size_bytes, duration_seconds, 120.0);
             cmd.arg(format!("--demuxer-max-bytes={}", dynamic_bytes));
             // Back buffer: ~30 seconds of video
-            let back_bytes = calculate_dynamic_demuxer_bytes(
-                file_size_bytes,
-                duration_seconds,
-                30.0,
-            );
+            let back_bytes =
+                calculate_dynamic_demuxer_bytes(file_size_bytes, duration_seconds, 30.0);
             cmd.arg(format!("--demuxer-max-back-bytes={}", back_bytes));
             cmd.arg("--demuxer-readahead-secs=30");
-            println!("[MPV] Using dynamic cache profile for ZIP proxy (forward={}, back={})", dynamic_bytes, back_bytes);
+            println!(
+                "[MPV] Using dynamic cache profile for ZIP proxy (forward={}, back={})",
+                dynamic_bytes, back_bytes
+            );
         } else {
             cmd.arg("--demuxer-max-bytes=500MiB");
             cmd.arg("--demuxer-max-back-bytes=100MiB");
@@ -560,6 +565,10 @@ pub fn launch_mpv_with_tracking(
 
 /// Check if MPV process is still running
 pub fn is_mpv_running(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+
     #[cfg(windows)]
     {
         use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
@@ -611,7 +620,9 @@ pub fn monitor_mpv_and_save_progress(
         if ticks_since_save >= 1 {
             if let Some(progress) = read_mpv_progress(media_id) {
                 if progress.duration > 0.0 {
-                    if let Err(e) = db.update_progress(media_id, progress.position, progress.duration) {
+                    if let Err(e) =
+                        db.update_progress(media_id, progress.position, progress.duration)
+                    {
                         println!("[MPV] Failed to update progress during playback: {}", e);
                     }
                 }
@@ -932,7 +943,10 @@ fn create_sync_lua_script(media_id: i64, session_id: &str) -> Result<PathBuf, St
     {
         use std::os::unix::fs::PermissionsExt;
         if let Err(e) = fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o600)) {
-            println!("[MPV] Warning: Failed to set sync Lua script permissions: {}", e);
+            println!(
+                "[MPV] Warning: Failed to set sync Lua script permissions: {}",
+                e
+            );
         }
     }
 
@@ -983,7 +997,7 @@ pub fn launch_mpv_with_sync(
     }
 
     if let Some(header) = auth_header {
-cmd.arg(format!("--http-header-fields={}", header));
+        cmd.arg(format!("--http-header-fields={}", header));
     }
 
     cmd.arg(file_or_url);
@@ -1056,7 +1070,9 @@ mod tests {
     fn set_appdata_override(dir: &std::path::Path) -> Option<(String, String)> {
         let key = "APPDATA";
         let old = std::env::var_os(key).map(|v| v.into_string().unwrap_or_default());
-        unsafe { std::env::set_var(key, dir); }
+        unsafe {
+            std::env::set_var(key, dir);
+        }
         old.map(|v| (key.to_string(), v))
     }
 
@@ -1438,12 +1454,18 @@ mod tests {
 
     #[test]
     fn dynamic_demuxer_none_file_size_returns_fallback() {
-        assert_eq!(calculate_dynamic_demuxer_bytes(None, Some(100.0), 60.0), "200MiB");
+        assert_eq!(
+            calculate_dynamic_demuxer_bytes(None, Some(100.0), 60.0),
+            "200MiB"
+        );
     }
 
     #[test]
     fn dynamic_demuxer_none_duration_returns_fallback() {
-        assert_eq!(calculate_dynamic_demuxer_bytes(Some(1_000_000), None, 60.0), "200MiB");
+        assert_eq!(
+            calculate_dynamic_demuxer_bytes(Some(1_000_000), None, 60.0),
+            "200MiB"
+        );
     }
 
     #[test]
@@ -1453,28 +1475,43 @@ mod tests {
 
     #[test]
     fn dynamic_demuxer_zero_duration_returns_fallback() {
-        assert_eq!(calculate_dynamic_demuxer_bytes(Some(1_000_000), Some(0.0), 60.0), "200MiB");
+        assert_eq!(
+            calculate_dynamic_demuxer_bytes(Some(1_000_000), Some(0.0), 60.0),
+            "200MiB"
+        );
     }
 
     #[test]
     fn dynamic_demuxer_negative_duration_returns_fallback() {
-        assert_eq!(calculate_dynamic_demuxer_bytes(Some(1_000_000), Some(-10.0), 60.0), "200MiB");
+        assert_eq!(
+            calculate_dynamic_demuxer_bytes(Some(1_000_000), Some(-10.0), 60.0),
+            "200MiB"
+        );
     }
 
     #[test]
     fn dynamic_demuxer_zero_file_size_returns_fallback() {
-        assert_eq!(calculate_dynamic_demuxer_bytes(Some(0), Some(100.0), 60.0), "200MiB");
+        assert_eq!(
+            calculate_dynamic_demuxer_bytes(Some(0), Some(100.0), 60.0),
+            "200MiB"
+        );
     }
 
     #[test]
     fn dynamic_demuxer_negative_file_size_returns_fallback() {
-        assert_eq!(calculate_dynamic_demuxer_bytes(Some(-1), Some(100.0), 60.0), "200MiB");
+        assert_eq!(
+            calculate_dynamic_demuxer_bytes(Some(-1), Some(100.0), 60.0),
+            "200MiB"
+        );
     }
 
     #[test]
     fn dynamic_demuxer_small_result_clamps_to_min_50mib() {
         // 1MB file, 3600s duration => ~284 B/s, * 60 target = ~17064 bytes => clamped to 50MiB
-        assert_eq!(calculate_dynamic_demuxer_bytes(Some(1_000_000), Some(3600.0), 60.0), "50MiB");
+        assert_eq!(
+            calculate_dynamic_demuxer_bytes(Some(1_000_000), Some(3600.0), 60.0),
+            "50MiB"
+        );
     }
 
     #[test]
@@ -1842,7 +1879,11 @@ mod tests {
         let sync_dir = get_sync_dir();
         std::fs::create_dir_all(&sync_dir).unwrap();
         let evt_file = sync_dir.join("evt_session1.json");
-        std::fs::write(&evt_file, r#"{"event_type":"play","position":10.5,"timestamp":12345}"#).unwrap();
+        std::fs::write(
+            &evt_file,
+            r#"{"event_type":"play","position":10.5,"timestamp":12345}"#,
+        )
+        .unwrap();
 
         let result = read_mpv_sync_event("session1");
         assert!(result.is_some());
@@ -1943,11 +1984,8 @@ mod tests {
 
     #[test]
     fn sync_lua_script_contains_all_paths() {
-        let script = get_sync_lua_script_content(
-            "C:\\progress.json",
-            "C:\\event.json",
-            "C:\\command.json",
-        );
+        let script =
+            get_sync_lua_script_content("C:\\progress.json", "C:\\event.json", "C:\\command.json");
         assert!(script.contains("C:/progress.json"));
         assert!(script.contains("C:/event.json"));
         assert!(script.contains("C:/command.json"));

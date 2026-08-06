@@ -110,9 +110,11 @@ impl DebridStore {
     pub fn load_or_init() -> Self {
         let path = super::debrid_file_path();
         let inner = match fs::read_to_string(&path) {
-            Ok(s) => serde_json::from_str::<DebridServiceFile>(&s).unwrap_or_else(|_| DebridServiceFile {
-                version: FILE_VERSION,
-                services: Vec::new(),
+            Ok(s) => serde_json::from_str::<DebridServiceFile>(&s).unwrap_or_else(|_| {
+                DebridServiceFile {
+                    version: FILE_VERSION,
+                    services: Vec::new(),
+                }
             }),
             Err(_) => DebridServiceFile {
                 version: FILE_VERSION,

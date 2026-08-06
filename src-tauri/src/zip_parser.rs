@@ -383,7 +383,7 @@ fn read_u64(data: &[u8], offset: usize) -> Result<u64, ZipError> {
 mod tests {
     use super::{
         find_eocd, parse_central_directory, parse_local_file_header, parse_zip64_extra,
-        sanitize_zip_entry_path, ZipCompressionType, ZipError, Zip64Extra,
+        sanitize_zip_entry_path, Zip64Extra, ZipCompressionType, ZipError,
     };
 
     #[test]
@@ -977,15 +977,30 @@ mod tests {
             "HTTP request failed: conn refused"
         );
         assert_eq!(
-            format!("{}", ZipError::CentralDirectoryTooLarge { size: 100, max: 50 }),
+            format!(
+                "{}",
+                ZipError::CentralDirectoryTooLarge { size: 100, max: 50 }
+            ),
             "Central directory too large: 100 bytes exceeds limit of 50 bytes"
         );
         assert_eq!(
-            format!("{}", ZipError::TooManyEntries { count: 200, max: 100 }),
+            format!(
+                "{}",
+                ZipError::TooManyEntries {
+                    count: 200,
+                    max: 100
+                }
+            ),
             "Too many ZIP entries: 200 exceeds limit of 100"
         );
         assert_eq!(
-            format!("{}", ZipError::HttpStatus { status: 404, message: "not found".into() }),
+            format!(
+                "{}",
+                ZipError::HttpStatus {
+                    status: 404,
+                    message: "not found".into()
+                }
+            ),
             "HTTP 404: not found"
         );
     }
@@ -1013,10 +1028,7 @@ mod tests {
 
     #[test]
     fn sanitize_normalizes_mixed_slashes() {
-        assert_eq!(
-            sanitize_zip_entry_path("a\\b/c\\d").unwrap(),
-            "a/b/c/d"
-        );
+        assert_eq!(sanitize_zip_entry_path("a\\b/c\\d").unwrap(), "a/b/c/d");
     }
 
     #[test]
@@ -1034,10 +1046,7 @@ mod tests {
     #[test]
     fn sanitize_single_dot_components_ok() {
         // "a/./b" should normalize to "a/b"
-        assert_eq!(
-            sanitize_zip_entry_path("a/./b").unwrap(),
-            "a/b"
-        );
+        assert_eq!(sanitize_zip_entry_path("a/./b").unwrap(), "a/b");
     }
 
     // --- Zip64Extra default test ---

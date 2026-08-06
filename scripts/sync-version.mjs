@@ -33,10 +33,14 @@ if (!SEMVER_PATTERN.test(version)) {
 }
 
 const tauriConf = readJson('src-tauri/tauri.conf.json');
-if (!tauriConf.package || typeof tauriConf.package !== 'object') {
+const tauriPackage = tauriConf.package;
+if (tauriPackage && typeof tauriPackage === 'object') {
+  tauriPackage.version = version;
+} else if (typeof tauriConf.version === 'string') {
+  tauriConf.version = version;
+} else {
   throw new Error('src-tauri/tauri.conf.json is missing package metadata');
 }
-tauriConf.package.version = version;
 writeJson('src-tauri/tauri.conf.json', tauriConf);
 
 const packageLock = readJson('package-lock.json');

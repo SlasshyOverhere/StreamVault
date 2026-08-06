@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, memo, Component, type ReactNode, type ErrorInfo } from 'react'
-import { invoke } from '@tauri-apps/api/tauri'
+import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useToast } from '@/components/ui/use-toast'
@@ -886,7 +886,10 @@ function RemoteSourceViewInner() {
           const paths = event.payload.paths
           if (paths.length > 0) {
             const filePath = paths[0]
-            if (filePath.endsWith('.exe')) {
+            const isWindows = /windows/i.test(navigator.userAgent)
+            if (isWindows && filePath.toLowerCase().endsWith('.exe')) {
+              handleBinaryInstall(filePath)
+            } else if (!isWindows) {
               handleBinaryInstall(filePath)
             } else {
               toast({ title: 'Invalid file', description: 'Please drop an .exe addon binary file.', variant: 'destructive' })

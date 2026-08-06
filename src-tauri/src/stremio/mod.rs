@@ -14,9 +14,9 @@ pub mod store;
 pub mod stream;
 
 #[cfg(test)]
-mod integration_test;
-#[cfg(test)]
 mod flix_test;
+#[cfg(test)]
+mod integration_test;
 #[cfg(test)]
 mod store_test;
 
@@ -148,7 +148,10 @@ impl From<&str> for StremioError {
 }
 
 #[tauri::command]
-pub fn stremio_add_addon(url: String, config: Option<String>) -> Result<StremioAddon, StremioError> {
+pub fn stremio_add_addon(
+    url: String,
+    config: Option<String>,
+) -> Result<StremioAddon, StremioError> {
     let mut addon = configure::resolve(&url, config).map_err(|e| e.to_string())?;
     addon.last_checked_at = chrono::Utc::now();
     addons().upsert(addon.clone())?;
@@ -187,7 +190,10 @@ pub fn stremio_list_addons() -> Result<Vec<StremioAddon>, StremioError> {
             }
         }
     }
-    eprintln!("[stremio_list_addons] returning {} addons to frontend", list.len());
+    eprintln!(
+        "[stremio_list_addons] returning {} addons to frontend",
+        list.len()
+    );
     Ok(list)
 }
 
@@ -201,8 +207,13 @@ pub fn stremio_fetch_catalog(
     let addon = addons()
         .find(&addon_id)
         .ok_or_else(|| StremioError::Generic("addon not found".to_string()))?;
-    catalog::fetch(&addon, &kind, &catalog_id, extra.as_ref().unwrap_or(&HashMap::new()))
-        .map_err(|e| e.to_string().into())
+    catalog::fetch(
+        &addon,
+        &kind,
+        &catalog_id,
+        extra.as_ref().unwrap_or(&HashMap::new()),
+    )
+    .map_err(|e| e.to_string().into())
 }
 
 #[tauri::command]
@@ -230,9 +241,7 @@ pub fn stremio_fetch_streams(
 }
 
 #[tauri::command]
-pub fn stremio_resolve_stream(
-    stream: debrid::StremioStreamLike,
-) -> Result<String, StremioError> {
+pub fn stremio_resolve_stream(stream: debrid::StremioStreamLike) -> Result<String, StremioError> {
     let default = debrids().default_service();
     debrid::resolve_stream(default.as_ref(), &stream).map_err(|e| e.to_string().into())
 }
@@ -278,7 +287,10 @@ fn parse_kind(s: &str) -> Result<DebridKind, StremioError> {
         "easydebrid" => Ok(DebridKind::EasyDebrid),
         "linksnappy" => Ok(DebridKind::LinkSnappy),
         "mega_debrid" => Ok(DebridKind::MegaDebrid),
-        other => Err(StremioError::Generic(format!("unknown debrid kind: {}", other))),
+        other => Err(StremioError::Generic(format!(
+            "unknown debrid kind: {}",
+            other
+        ))),
     }
 }
 

@@ -10,8 +10,7 @@ mod tests {
     fn fetch_live_manifest() {
         let url = std::env::var("STREMIO_TEST_MANIFEST_URL")
             .unwrap_or_else(|_| "https://example.com/manifest.json".to_string());
-        let parsed = manifest::fetch_and_parse(&url)
-            .expect("manifest should parse");
+        let parsed = manifest::fetch_and_parse(&url).expect("manifest should parse");
         assert!(!parsed.addon.id.is_empty());
         assert!(!parsed.addon.resources.is_empty());
     }

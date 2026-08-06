@@ -19,7 +19,10 @@ pub enum StreamError {
 }
 
 pub fn fetch(addon: &StremioAddon, kind: &str, id: &str) -> Result<StreamsResponse, StreamError> {
-    let base = addon.url.trim_end_matches("/manifest.json").trim_end_matches('/');
+    let base = addon
+        .url
+        .trim_end_matches("/manifest.json")
+        .trim_end_matches('/');
     let url = format!("{}/{}/{}/stream.json", base, kind, id);
     let client = crate::http_client::shared_client();
     let resp = client

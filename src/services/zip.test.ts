@@ -1,11 +1,11 @@
 import { describe, it, expect, vi } from 'vitest'
 import { analyzeZip, indexZipEpisodes, getZipStreamInfo } from './zip'
 
-vi.mock('@tauri-apps/api/tauri', () => ({
+vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
 }))
 
-const { invoke } = await import('@tauri-apps/api/tauri')
+const { invoke } = await import('@tauri-apps/api/core')
 const mockInvoke = vi.mocked(invoke)
 
 describe('analyzeZip', () => {

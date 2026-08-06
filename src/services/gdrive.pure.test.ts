@@ -9,7 +9,7 @@ import {
 } from './gdrive'
 import type { DriveItem } from './gdrive'
 
-vi.mock('@tauri-apps/api/tauri', () => ({ invoke: vi.fn() }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 
 describe('formatStorageSize', () => {
   it('returns "Unknown" for undefined/0', () => {

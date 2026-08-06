@@ -36,10 +36,8 @@ pub fn fetch(
         catalog_id
     );
     if !extra.is_empty() {
-        let mut pairs: Vec<(String, String)> = extra
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let mut pairs: Vec<(String, String)> =
+            extra.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         pairs.sort_by(|a, b| a.0.cmp(&b.0));
         let qs = url::form_urlencoded::Serializer::new(String::new())
             .extend_pairs(pairs)

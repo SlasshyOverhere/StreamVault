@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
@@ -164,7 +164,10 @@ impl DownloadManager {
             cancel_flag: cancel_flag.clone(),
         };
         {
-            self.jobs.lock().unwrap_or_else(|e| e.into_inner()).insert(id, record);
+            self.jobs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id, record);
         }
         self.persist_jobs();
         (snapshot, cancel_flag)
@@ -176,7 +179,10 @@ impl DownloadManager {
             .get_mut(job_id)
             .ok_or_else(|| "Download job not found".to_string())?;
         record.cancel_flag.store(true, Ordering::Relaxed);
-        if matches!(record.snapshot.status.as_str(), "queued" | "preparing" | "downloading") {
+        if matches!(
+            record.snapshot.status.as_str(),
+            "queued" | "preparing" | "downloading"
+        ) {
             record.snapshot.status = "cancelled".to_string();
             record.snapshot.updated_at = chrono::Utc::now().to_rfc3339();
         }
@@ -188,7 +194,8 @@ impl DownloadManager {
 
     pub fn delete_job(&self, job_id: &str) -> Result<(), String> {
         let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
-        jobs.remove(job_id).ok_or_else(|| "Download job not found".to_string())?;
+        jobs.remove(job_id)
+            .ok_or_else(|| "Download job not found".to_string())?;
         drop(jobs);
         self.persist_jobs();
         Ok(())
@@ -232,12 +239,18 @@ impl DownloadManager {
         let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         let before = jobs.len();
         jobs.retain(|_, record| {
-            if !matches!(record.snapshot.status.as_str(), "completed" | "failed" | "cancelled") {
+            if !matches!(
+                record.snapshot.status.as_str(),
+                "completed" | "failed" | "cancelled"
+            ) {
                 return true;
             }
             match chrono::DateTime::parse_from_rfc3339(&record.snapshot.updated_at) {
                 Ok(updated) => {
-                    now.signed_duration_since(updated).to_std().unwrap_or(Duration::ZERO) < max_age
+                    now.signed_duration_since(updated)
+                        .to_std()
+                        .unwrap_or(Duration::ZERO)
+                        < max_age
                 }
                 Err(_) => true, // keep if we can't parse the date
             }
@@ -246,7 +259,10 @@ impl DownloadManager {
         if removed > 0 {
             drop(jobs);
             self.persist_jobs();
-            println!("[DOWNLOAD] Cleaned up {} stale terminal jobs on startup", removed);
+            println!(
+                "[DOWNLOAD] Cleaned up {} stale terminal jobs on startup",
+                removed
+            );
         }
     }
 
@@ -343,7 +359,7 @@ pub fn unique_target_path(dir: &Path, file_name: &str) -> PathBuf {
 }
 
 pub fn emit_job_update(app_handle: &AppHandle, snapshot: &DownloadJobSnapshot) {
-    let _ = app_handle.emit_all(DOWNLOAD_EVENT, snapshot.clone());
+    let _ = app_handle.emit(DOWNLOAD_EVENT, snapshot.clone());
 }
 
 pub fn start_parallel_download(
@@ -433,7 +449,10 @@ pub fn start_parallel_download(
             let absolute_end = request.range_start + relative_end;
 
             tasks.push(tokio::spawn(async move {
-                let _permit = semaphore.acquire_owned().await.map_err(|error| error.to_string())?;
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .map_err(|error| error.to_string())?;
                 if cancel_flag.load(Ordering::Relaxed) {
                     return Err("cancelled".to_string());
                 }
@@ -462,8 +481,10 @@ pub fn start_parallel_download(
                     let bytes = response.bytes().await.map_err(|error| error.to_string())?;
                     if bytes.len() as u64 != expected_len {
                         if attempt < 3 {
-                            tokio::time::sleep(std::time::Duration::from_millis(250 * attempt as u64))
-                                .await;
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                250 * attempt as u64,
+                            ))
+                            .await;
                             continue;
                         }
                         return Err(format!(
@@ -474,15 +495,15 @@ pub fn start_parallel_download(
                     }
 
                     write_chunk(&temp_path, relative_start, bytes.as_ref())?;
-                    let total_downloaded =
-                        downloaded_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed)
-                            + bytes.len() as u64;
+                    let total_downloaded = downloaded_bytes
+                        .fetch_add(bytes.len() as u64, Ordering::Relaxed)
+                        + bytes.len() as u64;
                     let elapsed = started_at.elapsed().as_secs_f64().max(0.001);
                     if let Some(snapshot) = manager.update_job(&job_id, |job| {
                         job.downloaded_bytes = total_downloaded;
-                        job.progress =
-                            ((total_downloaded as f64 / job.total_bytes.max(1) as f64) * 100.0)
-                                .clamp(0.0, 100.0);
+                        job.progress = ((total_downloaded as f64 / job.total_bytes.max(1) as f64)
+                            * 100.0)
+                            .clamp(0.0, 100.0);
                         job.speed_bytes_per_second = Some(total_downloaded as f64 / elapsed);
                     }) {
                         emit_job_update(&app_handle, &snapshot);
@@ -695,8 +716,8 @@ pub async fn run_local_copy_job(
         let elapsed = started_at.elapsed().as_secs_f64().max(0.001);
         if let Some(snapshot) = manager.update_job(&job_id, |job| {
             job.downloaded_bytes = copied;
-            job.progress = ((copied as f64 / job.total_bytes.max(1) as f64) * 100.0)
-                .clamp(0.0, 100.0);
+            job.progress =
+                ((copied as f64 / job.total_bytes.max(1) as f64) * 100.0).clamp(0.0, 100.0);
             job.speed_bytes_per_second = Some(copied as f64 / elapsed);
         }) {
             emit_job_update(&app_handle, &snapshot);
@@ -757,12 +778,7 @@ fn write_chunk(path: &Path, offset: u64, bytes: &[u8]) -> Result<(), String> {
     file.write_all(bytes).map_err(|error| error.to_string())
 }
 
-fn fail_job(
-    app_handle: &AppHandle,
-    manager: &DownloadManager,
-    job_id: &str,
-    error: String,
-) {
+fn fail_job(app_handle: &AppHandle, manager: &DownloadManager, job_id: &str, error: String) {
     if let Some(snapshot) = manager.update_job(job_id, |job| {
         job.status = "failed".to_string();
         job.error = Some(error.clone());
@@ -813,7 +829,10 @@ mod tests {
 
     #[test]
     fn sanitize_normal_name() {
-        assert_eq!(sanitize_download_filename("movie.mp4", "fallback"), "movie.mp4");
+        assert_eq!(
+            sanitize_download_filename("movie.mp4", "fallback"),
+            "movie.mp4"
+        );
     }
 
     #[test]
@@ -852,7 +871,10 @@ mod tests {
 
     #[test]
     fn sanitize_empty_returns_fallback() {
-        assert_eq!(sanitize_download_filename("", "default_file"), "default_file");
+        assert_eq!(
+            sanitize_download_filename("", "default_file"),
+            "default_file"
+        );
     }
 
     #[test]
@@ -871,10 +893,7 @@ mod tests {
 
     #[test]
     fn sanitize_trims_whitespace_and_dots() {
-        assert_eq!(
-            sanitize_download_filename("  ...file...  ", "fb"),
-            "file"
-        );
+        assert_eq!(sanitize_download_filename("  ...file...  ", "fb"), "file");
     }
 
     #[test]
@@ -1147,10 +1166,24 @@ mod tests {
     #[test]
     fn list_jobs_sorted_by_created_at_desc() {
         let manager = DownloadManager::new_in_memory();
-        manager.create_job(1, "First".into(), "a.mp4".into(), PathBuf::from("/a"), 1, "gdrive".into());
+        manager.create_job(
+            1,
+            "First".into(),
+            "a.mp4".into(),
+            PathBuf::from("/a"),
+            1,
+            "gdrive".into(),
+        );
         // small delay so timestamps differ
         std::thread::sleep(std::time::Duration::from_millis(10));
-        manager.create_job(2, "Second".into(), "b.mp4".into(), PathBuf::from("/b"), 1, "gdrive".into());
+        manager.create_job(
+            2,
+            "Second".into(),
+            "b.mp4".into(),
+            PathBuf::from("/b"),
+            1,
+            "gdrive".into(),
+        );
         let jobs = manager.list_jobs();
         assert_eq!(jobs.len(), 2);
         assert_eq!(jobs[0].title, "Second");
@@ -1272,9 +1305,30 @@ mod tests {
     #[test]
     fn clear_history_removes_terminal_jobs() {
         let manager = DownloadManager::new_in_memory();
-        let (s1, _) = manager.create_job(1, "A".into(), "a.mp4".into(), PathBuf::from("/a"), 1, "gdrive".into());
-        let (s2, _) = manager.create_job(2, "B".into(), "b.mp4".into(), PathBuf::from("/b"), 1, "gdrive".into());
-        let (s3, _) = manager.create_job(3, "C".into(), "c.mp4".into(), PathBuf::from("/c"), 1, "gdrive".into());
+        let (s1, _) = manager.create_job(
+            1,
+            "A".into(),
+            "a.mp4".into(),
+            PathBuf::from("/a"),
+            1,
+            "gdrive".into(),
+        );
+        let (s2, _) = manager.create_job(
+            2,
+            "B".into(),
+            "b.mp4".into(),
+            PathBuf::from("/b"),
+            1,
+            "gdrive".into(),
+        );
+        let (s3, _) = manager.create_job(
+            3,
+            "C".into(),
+            "c.mp4".into(),
+            PathBuf::from("/c"),
+            1,
+            "gdrive".into(),
+        );
 
         // Mark s1 completed, s2 failed, leave s3 queued
         manager.update_job(&s1.id, |j| j.status = "completed".to_string());
@@ -1290,9 +1344,23 @@ mod tests {
     #[test]
     fn clear_history_keeps_active_jobs() {
         let manager = DownloadManager::new_in_memory();
-        let (s1, _) = manager.create_job(1, "Q".into(), "q.mp4".into(), PathBuf::from("/q"), 1, "gdrive".into());
+        let (s1, _) = manager.create_job(
+            1,
+            "Q".into(),
+            "q.mp4".into(),
+            PathBuf::from("/q"),
+            1,
+            "gdrive".into(),
+        );
         manager.update_job(&s1.id, |j| j.status = "preparing".to_string());
-        let (s2, _) = manager.create_job(2, "D".into(), "d.mp4".into(), PathBuf::from("/d"), 1, "gdrive".into());
+        let (s2, _) = manager.create_job(
+            2,
+            "D".into(),
+            "d.mp4".into(),
+            PathBuf::from("/d"),
+            1,
+            "gdrive".into(),
+        );
         manager.update_job(&s2.id, |j| j.status = "downloading".to_string());
 
         manager.clear_history();
@@ -1357,7 +1425,9 @@ mod tests {
         // write to disk, then load back
         let snapshots = {
             let jobs = manager.jobs.lock().unwrap_or_else(|e| e.into_inner());
-            jobs.values().map(|r| r.snapshot.clone()).collect::<Vec<_>>()
+            jobs.values()
+                .map(|r| r.snapshot.clone())
+                .collect::<Vec<_>>()
         };
         let json = serde_json::to_string_pretty(&snapshots).unwrap();
         let path = download_jobs_path();
@@ -1378,7 +1448,9 @@ mod tests {
         // restore or clean up
         match backup {
             Some(data) => fs::write(&path, data).unwrap(),
-            None => { let _ = fs::remove_file(&path); }
+            None => {
+                let _ = fs::remove_file(&path);
+            }
         }
     }
 
@@ -1425,7 +1497,9 @@ mod tests {
 
         match backup {
             Some(data) => fs::write(&path, data).unwrap(),
-            None => { let _ = fs::remove_file(&path); }
+            None => {
+                let _ = fs::remove_file(&path);
+            }
         }
     }
 
@@ -1557,7 +1631,14 @@ mod tests {
     #[test]
     fn clear_history_removes_cancelled_jobs() {
         let manager = DownloadManager::new_in_memory();
-        let (s1, _) = manager.create_job(1, "A".into(), "a.mp4".into(), PathBuf::from("/a"), 1, "gdrive".into());
+        let (s1, _) = manager.create_job(
+            1,
+            "A".into(),
+            "a.mp4".into(),
+            PathBuf::from("/a"),
+            1,
+            "gdrive".into(),
+        );
         manager.update_job(&s1.id, |j| j.status = "cancelled".to_string());
         manager.clear_history();
         assert_eq!(manager.list_jobs().len(), 0);
@@ -1566,7 +1647,14 @@ mod tests {
     #[test]
     fn update_job_returns_updated_snapshot() {
         let manager = DownloadManager::new_in_memory();
-        let (s, _) = manager.create_job(1, "T".into(), "t.mp4".into(), PathBuf::from("/t"), 100, "gdrive".into());
+        let (s, _) = manager.create_job(
+            1,
+            "T".into(),
+            "t.mp4".into(),
+            PathBuf::from("/t"),
+            100,
+            "gdrive".into(),
+        );
         let result = manager.update_job(&s.id, |j| {
             j.status = "downloading".to_string();
             j.downloaded_bytes = 50;
@@ -1584,7 +1672,14 @@ mod tests {
     #[test]
     fn update_job_sets_error_message() {
         let manager = DownloadManager::new_in_memory();
-        let (s, _) = manager.create_job(1, "E".into(), "e.mp4".into(), PathBuf::from("/e"), 100, "gdrive".into());
+        let (s, _) = manager.create_job(
+            1,
+            "E".into(),
+            "e.mp4".into(),
+            PathBuf::from("/e"),
+            100,
+            "gdrive".into(),
+        );
         manager.update_job(&s.id, |j| {
             j.status = "failed".to_string();
             j.error = Some("connection timeout".to_string());
@@ -1597,7 +1692,14 @@ mod tests {
     #[test]
     fn update_job_persists_across_get() {
         let manager = DownloadManager::new_in_memory();
-        let (s, _) = manager.create_job(1, "P".into(), "p.mp4".into(), PathBuf::from("/p"), 200, "gdrive".into());
+        let (s, _) = manager.create_job(
+            1,
+            "P".into(),
+            "p.mp4".into(),
+            PathBuf::from("/p"),
+            200,
+            "gdrive".into(),
+        );
         manager.update_job(&s.id, |j| {
             j.downloaded_bytes = 100;
             j.progress = 50.0;
@@ -1610,7 +1712,14 @@ mod tests {
     #[test]
     fn cancel_job_from_preparing_state() {
         let manager = DownloadManager::new_in_memory();
-        let (s, _) = manager.create_job(1, "P".into(), "p.mp4".into(), PathBuf::from("/p"), 100, "gdrive".into());
+        let (s, _) = manager.create_job(
+            1,
+            "P".into(),
+            "p.mp4".into(),
+            PathBuf::from("/p"),
+            100,
+            "gdrive".into(),
+        );
         manager.update_job(&s.id, |j| j.status = "preparing".to_string());
         let result = manager.cancel_job(&s.id).unwrap();
         assert_eq!(result.status, "cancelled");
@@ -1619,7 +1728,14 @@ mod tests {
     #[test]
     fn cancel_job_from_downloading_state() {
         let manager = DownloadManager::new_in_memory();
-        let (s, _) = manager.create_job(1, "D".into(), "d.mp4".into(), PathBuf::from("/d"), 100, "gdrive".into());
+        let (s, _) = manager.create_job(
+            1,
+            "D".into(),
+            "d.mp4".into(),
+            PathBuf::from("/d"),
+            100,
+            "gdrive".into(),
+        );
         manager.update_job(&s.id, |j| j.status = "downloading".to_string());
         let result = manager.cancel_job(&s.id).unwrap();
         assert_eq!(result.status, "cancelled");
@@ -1793,7 +1909,14 @@ mod tests {
     #[test]
     fn progress_clamped_to_100() {
         let manager = DownloadManager::new_in_memory();
-        let (s, _) = manager.create_job(1, "P".into(), "p.mp4".into(), PathBuf::from("/p"), 100, "gdrive".into());
+        let (s, _) = manager.create_job(
+            1,
+            "P".into(),
+            "p.mp4".into(),
+            PathBuf::from("/p"),
+            100,
+            "gdrive".into(),
+        );
         manager.update_job(&s.id, |j| {
             j.downloaded_bytes = 200; // more than total
             j.progress = ((200f64 / 100f64) * 100.0).clamp(0.0, 100.0);
@@ -1805,7 +1928,14 @@ mod tests {
     #[test]
     fn progress_zero_downloaded() {
         let manager = DownloadManager::new_in_memory();
-        let (s, _) = manager.create_job(1, "Z".into(), "z.mp4".into(), PathBuf::from("/z"), 1000, "gdrive".into());
+        let (s, _) = manager.create_job(
+            1,
+            "Z".into(),
+            "z.mp4".into(),
+            PathBuf::from("/z"),
+            1000,
+            "gdrive".into(),
+        );
         manager.update_job(&s.id, |j| {
             j.downloaded_bytes = 0;
             j.progress = 0.0;
@@ -1818,7 +1948,14 @@ mod tests {
     #[test]
     fn speed_tracking_with_none() {
         let manager = DownloadManager::new_in_memory();
-        let (s, _) = manager.create_job(1, "S".into(), "s.mp4".into(), PathBuf::from("/s"), 100, "gdrive".into());
+        let (s, _) = manager.create_job(
+            1,
+            "S".into(),
+            "s.mp4".into(),
+            PathBuf::from("/s"),
+            100,
+            "gdrive".into(),
+        );
         let fetched = manager.get_job(&s.id).unwrap();
         assert!(fetched.speed_bytes_per_second.is_none());
     }
@@ -1826,7 +1963,14 @@ mod tests {
     #[test]
     fn speed_tracking_with_value() {
         let manager = DownloadManager::new_in_memory();
-        let (s, _) = manager.create_job(1, "S".into(), "s.mp4".into(), PathBuf::from("/s"), 100, "gdrive".into());
+        let (s, _) = manager.create_job(
+            1,
+            "S".into(),
+            "s.mp4".into(),
+            PathBuf::from("/s"),
+            100,
+            "gdrive".into(),
+        );
         manager.update_job(&s.id, |j| {
             j.speed_bytes_per_second = Some(1_048_576.0); // 1 MB/s
         });
@@ -1839,7 +1983,14 @@ mod tests {
     #[test]
     fn state_transition_queued_to_preparing() {
         let manager = DownloadManager::new_in_memory();
-        let (s, _) = manager.create_job(1, "T".into(), "t.mp4".into(), PathBuf::from("/t"), 100, "gdrive".into());
+        let (s, _) = manager.create_job(
+            1,
+            "T".into(),
+            "t.mp4".into(),
+            PathBuf::from("/t"),
+            100,
+            "gdrive".into(),
+        );
         assert_eq!(s.status, "queued");
         manager.update_job(&s.id, |j| j.status = "preparing".to_string());
         assert_eq!(manager.get_job(&s.id).unwrap().status, "preparing");
@@ -1848,7 +1999,14 @@ mod tests {
     #[test]
     fn state_transition_preparing_to_downloading() {
         let manager = DownloadManager::new_in_memory();
-        let (s, _) = manager.create_job(1, "T".into(), "t.mp4".into(), PathBuf::from("/t"), 100, "gdrive".into());
+        let (s, _) = manager.create_job(
+            1,
+            "T".into(),
+            "t.mp4".into(),
+            PathBuf::from("/t"),
+            100,
+            "gdrive".into(),
+        );
         manager.update_job(&s.id, |j| j.status = "preparing".to_string());
         manager.update_job(&s.id, |j| j.status = "downloading".to_string());
         assert_eq!(manager.get_job(&s.id).unwrap().status, "downloading");
@@ -1857,7 +2015,14 @@ mod tests {
     #[test]
     fn state_transition_downloading_to_completed() {
         let manager = DownloadManager::new_in_memory();
-        let (s, _) = manager.create_job(1, "T".into(), "t.mp4".into(), PathBuf::from("/t"), 100, "gdrive".into());
+        let (s, _) = manager.create_job(
+            1,
+            "T".into(),
+            "t.mp4".into(),
+            PathBuf::from("/t"),
+            100,
+            "gdrive".into(),
+        );
         manager.update_job(&s.id, |j| j.status = "downloading".to_string());
         manager.update_job(&s.id, |j| {
             j.status = "completed".to_string();
@@ -1874,7 +2039,14 @@ mod tests {
     #[test]
     fn state_transition_downloading_to_failed() {
         let manager = DownloadManager::new_in_memory();
-        let (s, _) = manager.create_job(1, "T".into(), "t.mp4".into(), PathBuf::from("/t"), 100, "gdrive".into());
+        let (s, _) = manager.create_job(
+            1,
+            "T".into(),
+            "t.mp4".into(),
+            PathBuf::from("/t"),
+            100,
+            "gdrive".into(),
+        );
         manager.update_job(&s.id, |j| j.status = "downloading".to_string());
         manager.update_job(&s.id, |j| {
             j.status = "failed".to_string();
@@ -1890,8 +2062,22 @@ mod tests {
     #[test]
     fn multiple_jobs_independent_state() {
         let manager = DownloadManager::new_in_memory();
-        let (s1, _) = manager.create_job(1, "A".into(), "a.mp4".into(), PathBuf::from("/a"), 100, "gdrive".into());
-        let (s2, _) = manager.create_job(2, "B".into(), "b.mp4".into(), PathBuf::from("/b"), 200, "local".into());
+        let (s1, _) = manager.create_job(
+            1,
+            "A".into(),
+            "a.mp4".into(),
+            PathBuf::from("/a"),
+            100,
+            "gdrive".into(),
+        );
+        let (s2, _) = manager.create_job(
+            2,
+            "B".into(),
+            "b.mp4".into(),
+            PathBuf::from("/b"),
+            200,
+            "local".into(),
+        );
         manager.update_job(&s1.id, |j| j.status = "completed".to_string());
         // s2 should still be queued
         assert_eq!(manager.get_job(&s1.id).unwrap().status, "completed");
@@ -1901,8 +2087,22 @@ mod tests {
     #[test]
     fn delete_job_does_not_affect_others() {
         let manager = DownloadManager::new_in_memory();
-        let (s1, _) = manager.create_job(1, "A".into(), "a.mp4".into(), PathBuf::from("/a"), 100, "gdrive".into());
-        let (s2, _) = manager.create_job(2, "B".into(), "b.mp4".into(), PathBuf::from("/b"), 200, "local".into());
+        let (s1, _) = manager.create_job(
+            1,
+            "A".into(),
+            "a.mp4".into(),
+            PathBuf::from("/a"),
+            100,
+            "gdrive".into(),
+        );
+        let (s2, _) = manager.create_job(
+            2,
+            "B".into(),
+            "b.mp4".into(),
+            PathBuf::from("/b"),
+            200,
+            "local".into(),
+        );
         manager.delete_job(&s1.id).unwrap();
         assert!(manager.get_job(&s1.id).is_none());
         assert!(manager.get_job(&s2.id).is_some());
@@ -1913,14 +2113,28 @@ mod tests {
     #[test]
     fn cancel_flag_initial_false() {
         let manager = DownloadManager::new_in_memory();
-        let (_, flag) = manager.create_job(1, "F".into(), "f.mp4".into(), PathBuf::from("/f"), 100, "gdrive".into());
+        let (_, flag) = manager.create_job(
+            1,
+            "F".into(),
+            "f.mp4".into(),
+            PathBuf::from("/f"),
+            100,
+            "gdrive".into(),
+        );
         assert!(!flag.load(Ordering::Relaxed));
     }
 
     #[test]
     fn cancel_flag_shared_between_clones() {
         let manager = DownloadManager::new_in_memory();
-        let (_, flag) = manager.create_job(1, "F".into(), "f.mp4".into(), PathBuf::from("/f"), 100, "gdrive".into());
+        let (_, flag) = manager.create_job(
+            1,
+            "F".into(),
+            "f.mp4".into(),
+            PathBuf::from("/f"),
+            100,
+            "gdrive".into(),
+        );
         let flag2 = flag.clone();
         flag.store(true, Ordering::Relaxed);
         assert!(flag2.load(Ordering::Relaxed));

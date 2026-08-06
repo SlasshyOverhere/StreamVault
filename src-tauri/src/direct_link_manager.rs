@@ -79,8 +79,14 @@ pub fn validate_url(url: &str) -> Result<DdlValidationResult, String> {
     }
     // Check for private IP ranges (allow localhost for testing and local DDL sources)
     if let Some(host) = parsed.host_str() {
-        if host.starts_with("10.") || host.starts_with("172.16.") || host.starts_with("192.168.") || host.starts_with("169.254.") {
-            return Err("Private/internal network URLs are not allowed for direct links".to_string());
+        if host.starts_with("10.")
+            || host.starts_with("172.16.")
+            || host.starts_with("192.168.")
+            || host.starts_with("169.254.")
+        {
+            return Err(
+                "Private/internal network URLs are not allowed for direct links".to_string(),
+            );
         }
     }
     if let Some(host) = parsed.host_str() {
@@ -119,11 +125,7 @@ pub fn validate_url(url: &str) -> Result<DdlValidationResult, String> {
 
     // If HEAD didn't confirm Range support, try a small Range request to verify
     let supports_range = if !supports_range {
-        match client
-            .get(url)
-            .header(RANGE, "bytes=0-0")
-            .send()
-        {
+        match client.get(url).header(RANGE, "bytes=0-0").send() {
             Ok(resp) => resp.status().as_u16() == 206,
             Err(_) => false,
         }
@@ -160,10 +162,11 @@ pub fn index_archive(
     url: &str,
     validation: &DdlValidationResult,
 ) -> Result<DdlIndexResult, String> {
-    let format = archive_manager::detect_archive_format(&validation.filename, Some(&validation.content_type))
-        .ok_or_else(|| {
-            "This file is not a supported archive format (ZIP, RAR, or TAR).".to_string()
-        })?;
+    let format = archive_manager::detect_archive_format(
+        &validation.filename,
+        Some(&validation.content_type),
+    )
+    .ok_or_else(|| "This file is not a supported archive format (ZIP, RAR, or TAR).".to_string())?;
 
     match format {
         archive_manager::ArchiveFormat::Zip => index_zip_archive(url, validation),
@@ -251,9 +254,8 @@ fn index_zip_archive(
         .and_then(|v| v.checked_sub(1))
         .ok_or_else(|| "Invalid Central Directory range".to_string())?;
     let central_directory = fetch_range(&client, url, eocd.cd_offset, cd_end)?;
-    let parsed_entries =
-        zip_parser::parse_central_directory(&central_directory, eocd.cd_offset)
-            .map_err(|e| e.to_string())?;
+    let parsed_entries = zip_parser::parse_central_directory(&central_directory, eocd.cd_offset)
+        .map_err(|e| e.to_string())?;
 
     if parsed_entries.len() > DDL_MAX_ZIP_ENTRIES {
         return Err("Archive contains too many entries".to_string());
@@ -301,8 +303,7 @@ fn index_zip_archive(
             }
         };
 
-        let data_start_offset =
-            fetch_data_start_offset(&client, url, entry.local_header_offset)?;
+        let data_start_offset = fetch_data_start_offset(&client, url, entry.local_header_offset)?;
         let entry_name = entry
             .filename
             .rsplit('/')
@@ -463,7 +464,9 @@ fn is_supported_compression(method: u16) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_link_health, index_archive, validate_url, verify_and_refresh_link, DdlSource};
+    use super::{
+        check_link_health, index_archive, validate_url, verify_and_refresh_link, DdlSource,
+    };
     use crc32fast::Hasher;
     use std::net::TcpListener;
     use std::sync::Arc;
@@ -488,8 +491,9 @@ mod tests {
                 let body = Arc::clone(&body);
                 let total_len = body.len() as u64;
 
-                let content_type = Header::from_bytes(&b"Content-Type"[..], &b"application/octet-stream"[..])
-                    .unwrap();
+                let content_type =
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/octet-stream"[..])
+                        .unwrap();
                 let content_disposition = Header::from_bytes(
                     &b"Content-Disposition"[..],
                     format!("attachment; filename=\"{}\"", filename),
@@ -509,7 +513,9 @@ mod tests {
                     Method::Head => {
                         let response = headers
                             .into_iter()
-                            .fold(Response::empty(200), |response, header| response.with_header(header));
+                            .fold(Response::empty(200), |response, header| {
+                                response.with_header(header)
+                            });
                         let _ = request.respond(response);
                     }
                     Method::Get => {
@@ -529,14 +535,18 @@ mod tests {
                                             chunk.len().to_string(),
                                         )
                                         .unwrap(),
-                                        Header::from_bytes(&b"Content-Type"[..], &b"application/octet-stream"[..])
-                                            .unwrap(),
+                                        Header::from_bytes(
+                                            &b"Content-Type"[..],
+                                            &b"application/octet-stream"[..],
+                                        )
+                                        .unwrap(),
                                         Header::from_bytes(
                                             &b"Content-Disposition"[..],
                                             format!("attachment; filename=\"{}\"", filename),
                                         )
                                         .unwrap(),
-                                        Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..]).unwrap(),
+                                        Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..])
+                                            .unwrap(),
                                         Header::from_bytes(
                                             &b"Content-Range"[..],
                                             format!("bytes {}-{}/{}", start, end, total_len),
@@ -544,7 +554,8 @@ mod tests {
                                         .unwrap(),
                                     ];
                                     let response = partial_headers.into_iter().fold(
-                                        Response::from_data(chunk).with_status_code(StatusCode(206)),
+                                        Response::from_data(chunk)
+                                            .with_status_code(StatusCode(206)),
                                         |response, header| response.with_header(header),
                                     );
                                     let _ = request.respond(response);
@@ -678,7 +689,10 @@ mod tests {
         assert_eq!(indexed.source.entry_count, 4);
         assert_eq!(indexed.source.video_count, 3);
         assert_eq!(indexed.entries.len(), 3);
-        assert!(indexed.entries.iter().all(|entry| entry.title == "If Wishes Could Kill"));
+        assert!(indexed
+            .entries
+            .iter()
+            .all(|entry| entry.title == "If Wishes Could Kill"));
         assert_eq!(indexed.entries[0].season, Some(1));
         assert_eq!(indexed.entries[0].episode, Some(1));
         assert_eq!(indexed.entries[1].episode, Some(2));
@@ -823,9 +837,8 @@ mod tests {
 
     #[test]
     fn parse_content_disposition_parses_simple_filename() {
-        let result = super::parse_content_disposition_filename(
-            "attachment; filename=\"myfile.zip\"",
-        );
+        let result =
+            super::parse_content_disposition_filename("attachment; filename=\"myfile.zip\"");
         assert_eq!(result, Some("myfile.zip".to_string()));
     }
 

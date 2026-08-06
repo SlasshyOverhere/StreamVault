@@ -207,11 +207,7 @@ pub fn search_catalog(
 
 /// Probe Cinemeta first for a richer search. The basic manifest exposes
 /// the `top` catalog with a `search` extra, but not a free-text endpoint.
-pub fn search(
-    kind: CinemetaKind,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<CinemetaTitle>, String> {
+pub fn search(kind: CinemetaKind, query: &str, limit: usize) -> Result<Vec<CinemetaTitle>, String> {
     search_catalog(kind, query, limit)
 }
 

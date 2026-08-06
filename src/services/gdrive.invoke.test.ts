@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
 
-vi.mock('@tauri-apps/api/tauri', () => ({ invoke: vi.fn() }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 
-const { invoke } = await import('@tauri-apps/api/tauri')
+const { invoke } = await import('@tauri-apps/api/core')
 const mockInvoke = vi.mocked(invoke)
 
 beforeEach(() => vi.clearAllMocks())

@@ -1,7 +1,12 @@
 // ponytail: base builder avoids 35 lines of builder-chain duplication
 use std::sync::LazyLock;
 
-fn make_client(timeout: u64, connect: u64, keepalive: u64, label: &str) -> reqwest::blocking::Client {
+fn make_client(
+    timeout: u64,
+    connect: u64,
+    keepalive: u64,
+    label: &str,
+) -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout))
         .connect_timeout(std::time::Duration::from_secs(connect))
@@ -18,19 +23,16 @@ fn make_client(timeout: u64, connect: u64, keepalive: u64, label: &str) -> reqwe
 }
 
 /// Standard client for general API requests (30 s timeout).
-static SHARED_CLIENT: LazyLock<reqwest::blocking::Client> = LazyLock::new(|| {
-    make_client(30, 15, 20, "Failed to build shared HTTP client")
-});
+static SHARED_CLIENT: LazyLock<reqwest::blocking::Client> =
+    LazyLock::new(|| make_client(30, 15, 20, "Failed to build shared HTTP client"));
 
 /// Quick client for latency-sensitive operations (10 s timeout).
-static QUICK_CLIENT: LazyLock<reqwest::blocking::Client> = LazyLock::new(|| {
-    make_client(10, 10, 15, "Failed to build quick HTTP client")
-});
+static QUICK_CLIENT: LazyLock<reqwest::blocking::Client> =
+    LazyLock::new(|| make_client(10, 10, 15, "Failed to build quick HTTP client"));
 
 /// Long-timeout client for archive / large-file operations (300 s timeout).
-static LONG_CLIENT: LazyLock<reqwest::blocking::Client> = LazyLock::new(|| {
-    make_client(300, 30, 60, "Failed to build long HTTP client")
-});
+static LONG_CLIENT: LazyLock<reqwest::blocking::Client> =
+    LazyLock::new(|| make_client(300, 30, 60, "Failed to build long HTTP client"));
 
 /// Return a reference to the shared 30 s-timeout client.
 pub fn shared_client() -> &'static reqwest::blocking::Client {
@@ -75,13 +77,21 @@ pub fn local_http_get(url: &str) -> Result<String, String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {}", e))?;
     let host = parsed.host_str().ok_or("No host in URL")?;
     let port = parsed.port_or_known_default().unwrap_or(80);
-    let path = if parsed.path().is_empty() { "/" } else { parsed.path() };
-    let query = parsed.query().map(|q| format!("?{}", q)).unwrap_or_default();
+    let path = if parsed.path().is_empty() {
+        "/"
+    } else {
+        parsed.path()
+    };
+    let query = parsed
+        .query()
+        .map(|q| format!("?{}", q))
+        .unwrap_or_default();
     let addr = format!("{}:{}", host, port);
 
-    let mut stream = TcpStream::connect(&addr)
-        .map_err(|e| format!("Failed to connect to {}: {}", addr, e))?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))
+    let mut stream =
+        TcpStream::connect(&addr).map_err(|e| format!("Failed to connect to {}: {}", addr, e))?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(30)))
         .map_err(|e| format!("Failed to set timeout: {}", e))?;
 
     let request = format!(
@@ -89,15 +99,18 @@ pub fn local_http_get(url: &str) -> Result<String, String> {
         path, query, if port == 80 { host.to_string() } else { format!("{}:{}", host, port) }
     );
 
-    stream.write_all(request.as_bytes())
+    stream
+        .write_all(request.as_bytes())
         .map_err(|e| format!("Failed to send request: {}", e))?;
 
     let mut response = Vec::new();
-    stream.read_to_end(&mut response)
+    stream
+        .read_to_end(&mut response)
         .map_err(|e| format!("Failed to read response: {}", e))?;
 
     let response_str = String::from_utf8_lossy(&response);
-    let body_start = response_str.find("\r\n\r\n")
+    let body_start = response_str
+        .find("\r\n\r\n")
         .ok_or("Invalid HTTP response")?;
     let raw_body = &response_str[body_start + 4..];
 
@@ -108,7 +121,9 @@ pub fn local_http_get(url: &str) -> Result<String, String> {
     }
 
     // Handle chunked transfer encoding
-    let is_chunked = response_str.to_lowercase().contains("transfer-encoding: chunked");
+    let is_chunked = response_str
+        .to_lowercase()
+        .contains("transfer-encoding: chunked");
     let body = if is_chunked {
         decode_chunked_body(raw_body)
     } else {
@@ -159,28 +174,45 @@ fn decode_chunked_body(input: &str) -> String {
 /// Make a raw HTTP GET request to a local server using TCP, returning a streaming reader.
 /// Returns (content_length, reader) where reader yields the response body bytes.
 /// Bypasses reqwest's loopback restriction for streaming large files.
-pub fn local_http_get_raw(url: &str) -> Result<(u64, std::io::BufReader<std::net::TcpStream>), String> {
+pub fn local_http_get_raw(
+    url: &str,
+) -> Result<(u64, std::io::BufReader<std::net::TcpStream>), String> {
     use std::io::{BufRead, Read, Write};
     use std::net::TcpStream;
 
     let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {}", e))?;
     let host = parsed.host_str().ok_or("No host in URL")?;
     let port = parsed.port_or_known_default().unwrap_or(80);
-    let path = if parsed.path().is_empty() { "/" } else { parsed.path() };
-    let query = parsed.query().map(|q| format!("?{}", q)).unwrap_or_default();
+    let path = if parsed.path().is_empty() {
+        "/"
+    } else {
+        parsed.path()
+    };
+    let query = parsed
+        .query()
+        .map(|q| format!("?{}", q))
+        .unwrap_or_default();
     let addr = format!("{}:{}", host, port);
 
-    let mut stream = TcpStream::connect(&addr)
-        .map_err(|e| format!("Failed to connect to {}: {}", addr, e))?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(3600)))
+    let mut stream =
+        TcpStream::connect(&addr).map_err(|e| format!("Failed to connect to {}: {}", addr, e))?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(3600)))
         .map_err(|e| format!("Failed to set timeout: {}", e))?;
 
     let request = format!(
         "GET {}{} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept: */*\r\n\r\n",
-        path, query, if port == 80 { host.to_string() } else { format!("{}:{}", host, port) }
+        path,
+        query,
+        if port == 80 {
+            host.to_string()
+        } else {
+            format!("{}:{}", host, port)
+        }
     );
 
-    stream.write_all(request.as_bytes())
+    stream
+        .write_all(request.as_bytes())
         .map_err(|e| format!("Failed to send request: {}", e))?;
 
     // Read headers line by line
@@ -190,7 +222,8 @@ pub fn local_http_get_raw(url: &str) -> Result<(u64, std::io::BufReader<std::net
 
     loop {
         let mut header_line = String::new();
-        reader.read_line(&mut header_line)
+        reader
+            .read_line(&mut header_line)
             .map_err(|e| format!("Failed to read header: {}", e))?;
         let trimmed = header_line.trim();
 
@@ -204,7 +237,10 @@ pub fn local_http_get_raw(url: &str) -> Result<(u64, std::io::BufReader<std::net
         }
 
         // Parse Content-Length
-        if let Some(val) = trimmed.strip_prefix("Content-Length:").or_else(|| trimmed.strip_prefix("content-length:")) {
+        if let Some(val) = trimmed
+            .strip_prefix("Content-Length:")
+            .or_else(|| trimmed.strip_prefix("content-length:"))
+        {
             content_length = val.trim().parse().unwrap_or(0);
         }
     }

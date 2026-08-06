@@ -17,7 +17,8 @@ mod tests {
     use std::thread;
 
     fn handle_request(mut s: std::net::TcpStream) {
-        s.set_read_timeout(Some(std::time::Duration::from_secs(2))).ok();
+        s.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .ok();
         let mut buf = vec![0u8; 8192];
         let mut total = String::new();
         loop {
@@ -58,12 +59,10 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         // Spawn a thread that loops, handling one connection at a time so
         // the test's pooled HTTP client always gets a fresh response.
-        thread::spawn(move || {
-            loop {
-                match listener.accept() {
-                    Ok((s, _)) => handle_request(s),
-                    Err(_) => break,
-                }
+        thread::spawn(move || loop {
+            match listener.accept() {
+                Ok((s, _)) => handle_request(s),
+                Err(_) => break,
             }
         });
         std::thread::sleep(std::time::Duration::from_millis(50));

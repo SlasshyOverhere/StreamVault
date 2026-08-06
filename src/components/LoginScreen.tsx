@@ -7,9 +7,10 @@
 
 import { useState, useEffect } from 'react'
 import { Loader2, Film, Users, Shield, Zap, Minus, X, Server } from 'lucide-react'
-import { appWindow } from '@tauri-apps/api/window'
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { getConfig, saveConfig } from '@/services/api'
 import slasshyvaultIcon from '@/assets/slasshyvault-icon-ui.png'
+const appWindow = getCurrentWebviewWindow()
 
 interface LoginScreenProps {
   onLogin: () => void

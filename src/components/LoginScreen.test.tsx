@@ -3,11 +3,11 @@ import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { LoginScreen } from './LoginScreen'
 
-vi.mock('@tauri-apps/api/window', () => ({
-  appWindow: {
+vi.mock('@tauri-apps/api/webviewWindow', () => ({
+  getCurrentWebviewWindow: () => ({
     minimize: vi.fn(),
     hide: vi.fn(),
-  },
+  }),
 }))
 
 vi.mock('lucide-react', () => ({

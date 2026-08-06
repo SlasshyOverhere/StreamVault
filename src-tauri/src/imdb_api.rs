@@ -34,4 +34,3 @@ mod tests {
         assert!(!looks_like_imdb_id("ttXYZ"));
     }
 }
-

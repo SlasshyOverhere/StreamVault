@@ -77,7 +77,7 @@ export function PlayerModal({ open, onOpenChange, onSelectPlayer, title }: Playe
                             </div>
                         </div>
                         <div className="text-xs text-muted-foreground/70 pl-12">
-                            Opens mpv.exe as an external process
+                            Opens MPV as an external process
                         </div>
                     </Button>
                 </div>

@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { parseVideoFilename, getGDriveAuthStatus } from './gdrive';
 
 // Mock Tauri invoke to avoid issues during import/execution
-vi.mock('@tauri-apps/api/tauri', () => ({
+vi.mock('@tauri-apps/api/core', () => ({
     invoke: vi.fn(),
 }));
 

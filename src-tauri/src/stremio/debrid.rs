@@ -201,17 +201,10 @@ pub fn validate_key(kind: DebridKind, api_key: &str) -> Result<String, DebridErr
             false,
         ),
         DebridKind::Offcloud => (
-            format!(
-                "{}/account/info?apiKey={}",
-                kind.api_base(),
-                api_key
-            ),
+            format!("{}/account/info?apiKey={}", kind.api_base(), api_key),
             false,
         ),
-        DebridKind::EasyDebrid => (
-            format!("{}/user?key={}", kind.api_base(), api_key),
-            false,
-        ),
+        DebridKind::EasyDebrid => (format!("{}/user?key={}", kind.api_base(), api_key), false),
         DebridKind::LinkSnappy => (
             format!("{}/account/info?apikey={}", kind.api_base(), api_key),
             false,
@@ -299,10 +292,7 @@ pub fn unrestrict_magnet(
     }
 }
 
-fn unrestrict_real_debrid(
-    service: &DebridService,
-    magnet: &str,
-) -> Result<String, DebridError> {
+fn unrestrict_real_debrid(service: &DebridService, magnet: &str) -> Result<String, DebridError> {
     let client = crate::http_client::shared_client();
     let resp = client
         .post(format!("{}/unrestrict/link", service.kind.api_base()))
@@ -326,10 +316,7 @@ fn unrestrict_real_debrid(
         .ok_or_else(|| DebridError::Unrestrict("no download URL in response".to_string()))
 }
 
-fn unrestrict_all_debrid(
-    service: &DebridService,
-    magnet: &str,
-) -> Result<String, DebridError> {
+fn unrestrict_all_debrid(service: &DebridService, magnet: &str) -> Result<String, DebridError> {
     let client = crate::http_client::shared_client();
     // Step 1: upload the magnet.
     let upload_resp = client
@@ -383,7 +370,10 @@ fn unrestrict_all_debrid(
         if !ready {
             continue;
         }
-        if let Some(link) = status.pointer("/data/magnets/links/0/link").and_then(|v| v.as_str()) {
+        if let Some(link) = status
+            .pointer("/data/magnets/links/0/link")
+            .and_then(|v| v.as_str())
+        {
             // Step 3: unrestrict that link.
             let unlock = client
                 .get(format!(
@@ -399,10 +389,7 @@ fn unrestrict_all_debrid(
                 let unlock_json: serde_json::Value = unlock
                     .json()
                     .map_err(|e| DebridError::Unrestrict(e.to_string()))?;
-                if let Some(u) = unlock_json
-                    .pointer("/data/link")
-                    .and_then(|v| v.as_str())
-                {
+                if let Some(u) = unlock_json.pointer("/data/link").and_then(|v| v.as_str()) {
                     return Ok(u.to_string());
                 }
             }
@@ -445,7 +432,9 @@ fn unrestrict_premiumize(
         .send()
         .map_err(|e| DebridError::Unrestrict(e.to_string()))?;
     if !info.status().is_success() {
-        return Err(DebridError::Unrestrict("Premiumize info failed".to_string()));
+        return Err(DebridError::Unrestrict(
+            "Premiumize info failed".to_string(),
+        ));
     }
     let body: serde_json::Value = info
         .json()
@@ -509,10 +498,16 @@ fn unrestrict_torbox(
     let api = service.api_key.clone();
     // Step 1: create a torrent from the magnet.
     let create = client
-        .post(format!("{}/v1/api/torrents/createtorrent", service.kind.api_base()))
+        .post(format!(
+            "{}/v1/api/torrents/createtorrent",
+            service.kind.api_base()
+        ))
         .query(&[("api_key", &api)])
         .form(&[
-            ("magnet", service.kind.build_magnet(info_hash, name).as_str()),
+            (
+                "magnet",
+                service.kind.build_magnet(info_hash, name).as_str(),
+            ),
             ("name", name.unwrap_or("")),
         ])
         .timeout(Duration::from_secs(30))
@@ -537,7 +532,11 @@ fn unrestrict_torbox(
             "{}/v1/api/torrents/requestdl",
             service.kind.api_base()
         ))
-        .query(&[("api_key", &api), ("torrent_id", &torrent_id.to_string()), ("file_id", &"0".to_string())])
+        .query(&[
+            ("api_key", &api),
+            ("torrent_id", &torrent_id.to_string()),
+            ("file_id", &"0".to_string()),
+        ])
         .timeout(Duration::from_secs(30))
         .send()
         .map_err(|e| DebridError::Unrestrict(e.to_string()))?;
@@ -557,10 +556,7 @@ fn unrestrict_torbox(
         .ok_or_else(|| DebridError::Unrestrict("no TorBox download link".to_string()))
 }
 
-fn unrestrict_offcloud(
-    service: &DebridService,
-    magnet: &str,
-) -> Result<String, DebridError> {
+fn unrestrict_offcloud(service: &DebridService, magnet: &str) -> Result<String, DebridError> {
     let client = crate::http_client::shared_client();
     let resp = client
         .post(format!("{}/cache", service.kind.api_base()))
@@ -584,10 +580,7 @@ fn unrestrict_offcloud(
         .ok_or_else(|| DebridError::Unrestrict("no Offcloud link".to_string()))
 }
 
-fn unrestrict_easydebrid(
-    service: &DebridService,
-    magnet: &str,
-) -> Result<String, DebridError> {
+fn unrestrict_easydebrid(service: &DebridService, magnet: &str) -> Result<String, DebridError> {
     let client = crate::http_client::shared_client();
     let resp = client
         .post(format!("{}/link/any", service.kind.api_base()))
@@ -612,10 +605,7 @@ fn unrestrict_easydebrid(
         .ok_or_else(|| DebridError::Unrestrict("no EasyDebrid link".to_string()))
 }
 
-fn unrestrict_linksnappy(
-    service: &DebridService,
-    magnet: &str,
-) -> Result<String, DebridError> {
+fn unrestrict_linksnappy(service: &DebridService, magnet: &str) -> Result<String, DebridError> {
     let client = crate::http_client::shared_client();
     let resp = client
         .post(format!("{}/upload/any", service.kind.api_base()))
@@ -641,10 +631,7 @@ fn unrestrict_linksnappy(
         .ok_or_else(|| DebridError::Unrestrict("no LinkSnappy link".to_string()))
 }
 
-fn unrestrict_megadebrid(
-    service: &DebridService,
-    magnet: &str,
-) -> Result<String, DebridError> {
+fn unrestrict_megadebrid(service: &DebridService, magnet: &str) -> Result<String, DebridError> {
     let client = crate::http_client::shared_client();
     let resp = client
         .post(format!("{}/api/generate", service.kind.api_base()))

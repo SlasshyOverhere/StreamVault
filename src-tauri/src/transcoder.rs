@@ -6,7 +6,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 use tiny_http::{Header, Response, Server};
 
 // ponytail: LazyLock replaces lazy_static
-static TRANSCODE_SESSIONS: LazyLock<Arc<Mutex<HashMap<u64, TranscodeSession>>>> = LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
+static TRANSCODE_SESSIONS: LazyLock<Arc<Mutex<HashMap<u64, TranscodeSession>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 static SESSION_COUNTER: LazyLock<Arc<Mutex<u64>>> = LazyLock::new(|| Arc::new(Mutex::new(0)));
 
 pub struct TranscodeSession {
@@ -170,7 +171,10 @@ pub fn start_transcode(
             if let Some(ref mut process) = session.ffmpeg_process {
                 let _ = process.kill();
             }
-            println!("[TRANSCODE] Auto-cleaned session {} after server exit", session_id_for_cleanup);
+            println!(
+                "[TRANSCODE] Auto-cleaned session {} after server exit",
+                session_id_for_cleanup
+            );
         }
     });
 
@@ -694,7 +698,11 @@ mod tests {
         // Verify find_available_port returns a port in the expected range
         // (Cannot reliably re-bind due to TOCTOU race with other tests)
         if let Some(port) = find_available_port() {
-            assert!((9000..9100).contains(&port), "port {} outside expected range 9000-9100", port);
+            assert!(
+                (9000..9100).contains(&port),
+                "port {} outside expected range 9000-9100",
+                port
+            );
         }
     }
 
@@ -757,8 +765,14 @@ mod tests {
         assert!(stop_transcode(500002).is_ok());
 
         let sessions = TRANSCODE_SESSIONS.lock().unwrap();
-        assert!(sessions.contains_key(&500001), "other session should remain");
-        assert!(!sessions.contains_key(&500002), "target session should be removed");
+        assert!(
+            sessions.contains_key(&500001),
+            "other session should remain"
+        );
+        assert!(
+            !sessions.contains_key(&500002),
+            "target session should be removed"
+        );
     }
 
     // ── stop_all_transcodes drains all ──
@@ -790,11 +804,7 @@ mod tests {
     #[test]
     fn start_transcode_ffmpeg_path_is_directory() {
         // Use a path that exists as a directory, not an executable
-        let result = start_transcode(
-            "C:\\Windows",
-            "C:\\Windows\\System32\\notepad.exe",
-            None,
-        );
+        let result = start_transcode("C:\\Windows", "C:\\Windows\\System32\\notepad.exe", None);
         assert!(result.is_err());
     }
 

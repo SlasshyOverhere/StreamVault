@@ -39,7 +39,7 @@ const BASE: &str = "https://api.balloonerismm.workers.dev";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MovieDetail {
-    pub id: String,            // "tt0133093"
+    pub id: String, // "tt0133093"
     pub imdb_url: Option<String>,
     pub title: Option<String>,
     pub original_title: Option<String>,
@@ -47,7 +47,7 @@ pub struct MovieDetail {
     pub overview: Option<String>,
     pub tagline: Option<String>,
     pub release_date: Option<String>, // "1999-03-31"
-    pub runtime: Option<i32>,          // MINUTES
+    pub runtime: Option<i32>,         // MINUTES
     pub vote_average: Option<f64>,
     pub vote_count: Option<i64>,
     pub popularity: Option<f64>,
@@ -272,10 +272,7 @@ impl ImagesResponse {
                 .into_iter()
                 .filter_map(|e| {
                     let url = e.file_path?;
-                    let area = e
-                        .width
-                        .unwrap_or(0)
-                        .saturating_mul(e.height.unwrap_or(0));
+                    let area = e.width.unwrap_or(0).saturating_mul(e.height.unwrap_or(0));
                     Some((url, area))
                 })
                 .max_by_key(|(_, area)| *area)
@@ -367,7 +364,10 @@ pub fn get_season(imdb_id: &str, season_number: i32) -> Result<SeasonDetail, Str
         return Err(format!("[BALLOON] not an IMDb id: {}", id));
     }
     if season_number < 1 {
-        return Err(format!("[BALLOON] invalid season number: {}", season_number));
+        return Err(format!(
+            "[BALLOON] invalid season number: {}",
+            season_number
+        ));
     }
     let url = format!("{}/tv/{}/season/{}", BASE, id, season_number);
     http_get_json(&url)

@@ -2,115 +2,61 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
-    "devPath": "http://localhost:3255",
-    "distDir": "../dist",
-    "withGlobalTauri": false
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:3255"
   },
-  "package": {
-    "productName": "SlasshyVault",
-    "version": "3.0.61"
-  },
-  "tauri": {
-    "allowlist": {
-      "all": false,
-      "dialog": {
-        "all": false,
-        "open": true,
-        "save": false
-      },
-      "protocol": {
-        "asset": true,
-        "assetScope": [
-          "$APPDATA/**",
-          "$RESOURCE/**"
-        ]
-      },
-      "fs": {
-        "all": false,
-        "readFile": true,
-        "writeFile": true,
-        "readDir": true,
-        "createDir": true,
-        "removeFile": true,
-        "renameFile": true,
-        "exists": true,
-        "scope": [
-          "$APPDATA/**",
-          "$RESOURCE/**",
-          "$HOME/**"
-        ]
-      },
-      "http": {
-        "all": false,
-        "request": true,
-        "scope": [
-          "https://api.themoviedb.org/**",
-          "https://api.imdbapi.dev/**",
-          "https://m.media-amazon.com/**",
-          "https://v3-cinemeta.strem.io/**",
-          "https://cinemeta-catalogs.strem.io/**",
-          "https://images.metahub.space/**",
-          "https://episodes.metahub.space/**",
-          "https://www.googleapis.com/**",
-          "https://slasshyvault.onrender.com/**",
-          "http://localhost:3255/**",
-          "http://127.0.0.1:3255/**"
-        ]
-      },
-      "shell": {
-        "all": false,
-        "open": true
-      },
-      "window": {
-        "all": true
-      }
+  "bundle": {
+    "active": true,
+    "category": "DeveloperTool",
+    "copyright": "Copyright (c) 2026 Suman Patgiri",
+    "targets": "all",
+    "externalBin": [],
+    "icon": [
+      "icons/slasshyvault.png",
+      "icons/slasshyvault.ico"
+    ],
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
     },
-    "bundle": {
-      "active": true,
-      "category": "DeveloperTool",
-      "copyright": "Copyright (c) 2026 Suman Patgiri",
+    "longDescription": "",
+    "macOS": {
+      "entitlements": null,
+      "exceptionDomain": "",
+      "frameworks": [],
+      "providerShortName": null,
+      "signingIdentity": null
+    },
+    "resources": [],
+    "shortDescription": "",
+    "linux": {
       "deb": {
-        "depends": []
-      },
-      "externalBin": [],
-      "icon": [
-        "icons/slasshyvault.png",
-        "icons/slasshyvault.ico"
-      ],
-      "identifier": "com.slasshyvault.app",
-      "longDescription": "",
-      "macOS": {
-        "entitlements": null,
-        "exceptionDomain": "",
-        "frameworks": [],
-        "providerShortName": null,
-        "signingIdentity": null
-      },
-      "resources": [],
-      "shortDescription": "",
-      "targets": "all",
-      "windows": {
-        "certificateThumbprint": null,
-        "digestAlgorithm": "sha256",
-        "timestampUrl": ""
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "libayatana-appindicator3-1",
+          "librsvg2-2",
+          "libdbus-1-3"
+        ]
       }
     },
-    "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: https://m.media-amazon.com https://images.metahub.space https://episodes.metahub.space https: data:; media-src 'self' asset: blob: https: http://localhost:* http://127.0.0.1:*; style-src 'self'; script-src 'self'; connect-src 'self' https://api.themoviedb.org https://api.imdbapi.dev https://v3-cinemeta.strem.io https://cinemeta-catalogs.strem.io https://images.metahub.space https://episodes.metahub.space https://www.googleapis.com https://slasshyvault.onrender.com ws://slasshyvault.onrender.com wss://slasshyvault.onrender.com http://localhost:* http://127.0.0.1:*; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
-    },
+    "createUpdaterArtifacts": "v1Compatible"
+  },
+  "productName": "SlasshyVault",
+  "mainBinaryName": "SlasshyVault",
+  "version": "3.0.61",
+  "identifier": "com.slasshyvault.app",
+  "plugins": {
     "updater": {
-      "active": true,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRDQ0I5Mjk5NjFBQjU5MzEKUldReFdhdGhtWkxMVENNT1FNbWhZT0VUVmlJaEREdkR2akRGdFhFVDFHRWZIMnlUQ0JQSUtPN0UK",
       "endpoints": [
         "https://github.com/SlasshyOverhere/SlasshyVault/releases/latest/download/latest.json"
-      ],
-      "dialog": false,
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRDQ0I5Mjk5NjFBQjU5MzEKUldReFdhdGhtWkxMVENNT1FNbWhZT0VUVmlJaEREdkR2akRGdFhFVDFHRWZIMnlUQ0JQSUtPN0UK"
-    },
-    "systemTray": {
-      "iconPath": "icons/slasshyvault.ico",
-      "iconAsTemplate": false,
-      "menuOnLeftClick": false
-    },
+      ]
+    }
+  },
+  "app": {
+    "withGlobalTauri": false,
     "windows": [
       {
         "center": true,
@@ -123,8 +69,24 @@
         "maximizable": false,
         "minWidth": 900,
         "minHeight": 600,
-        "decorations": false
+        "decorations": false,
+        "useHttpsScheme": true
       }
-    ]
+    ],
+    "security": {
+      "assetProtocol": {
+        "scope": [
+          "$APPDATA/**",
+          "$RESOURCE/**"
+        ],
+        "enable": true
+      },
+      "csp": "default-src 'self'; img-src 'self' asset: https://m.media-amazon.com https://images.metahub.space https://episodes.metahub.space https: data:; media-src 'self' asset: blob: https: http://localhost:* http://127.0.0.1:*; style-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost 'self' https://api.themoviedb.org https://api.imdbapi.dev https://v3-cinemeta.strem.io https://cinemeta-catalogs.strem.io https://images.metahub.space https://episodes.metahub.space https://www.googleapis.com https://slasshyvault.onrender.com ws://slasshyvault.onrender.com wss://slasshyvault.onrender.com http://localhost:* http://127.0.0.1:*; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
+    },
+    "trayIcon": {
+      "iconPath": "icons/slasshyvault.ico",
+      "iconAsTemplate": false,
+      "menuOnLeftClick": false
+    }
   }
 }

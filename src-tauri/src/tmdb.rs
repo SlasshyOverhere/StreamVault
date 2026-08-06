@@ -138,8 +138,6 @@ struct TmdbFindResult {
     tv_results: Vec<TmdbItem>,
 }
 
-
-
 /// Check if the given credential is an access token (starts with "eyJ") or API key
 fn is_access_token(credential: &str) -> bool {
     credential.starts_with("eyJ")
@@ -637,9 +635,8 @@ fn balloonerismm_fallback_search(
     for &kind in kinds {
         // Pull the appropriate search response.
         let (json_results, mapped_media_type) = if kind == "movie" {
-            let page = crate::balloonerismm_api::search_movie(title).map_err(|e| {
-                Box::<dyn std::error::Error + Send + Sync>::from(e.to_string())
-            })?;
+            let page = crate::balloonerismm_api::search_movie(title)
+                .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(e.to_string()))?;
             let v: Vec<serde_json::Value> = page
                 .results
                 .into_iter()
@@ -647,9 +644,8 @@ fn balloonerismm_fallback_search(
                 .collect();
             (v, "movie")
         } else {
-            let page = crate::balloonerismm_api::search_tv(title).map_err(|e| {
-                Box::<dyn std::error::Error + Send + Sync>::from(e.to_string())
-            })?;
+            let page = crate::balloonerismm_api::search_tv(title)
+                .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(e.to_string()))?;
             let v: Vec<serde_json::Value> = page
                 .results
                 .into_iter()
@@ -713,10 +709,13 @@ fn fetch_metadata_by_cinemeta_title(
             .collect::<Vec<_>>()
             .join(", ")
     });
-    let director = t
-        .director
-        .clone()
-        .and_then(|mut v| if v.is_empty() { None } else { Some(v.remove(0)) });
+    let director = t.director.clone().and_then(|mut v| {
+        if v.is_empty() {
+            None
+        } else {
+            Some(v.remove(0))
+        }
+    });
     let runtime = t
         .runtime
         .as_deref()
@@ -923,9 +922,7 @@ fn imdb_search_as_list_items(
             let json_results: Vec<serde_json::Value> = p
                 .results
                 .into_iter()
-                .map(|r| {
-                    serde_json::to_value(r).unwrap_or_else(|_| serde_json::Value::Null)
-                })
+                .map(|r| serde_json::to_value(r).unwrap_or_else(|_| serde_json::Value::Null))
                 .collect();
             crate::balloonerismm_api::SearchPage {
                 page: p.page,
@@ -935,16 +932,13 @@ fn imdb_search_as_list_items(
             }
         }
         Some("tv") => {
-            let p: crate::balloonerismm_api::SearchPage<
-                crate::balloonerismm_api::TvSearchResult,
-            > = crate::balloonerismm_api::search_tv(query)
-                .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(e.to_string()))?;
+            let p: crate::balloonerismm_api::SearchPage<crate::balloonerismm_api::TvSearchResult> =
+                crate::balloonerismm_api::search_tv(query)
+                    .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(e.to_string()))?;
             let json_results: Vec<serde_json::Value> = p
                 .results
                 .into_iter()
-                .map(|r| {
-                    serde_json::to_value(r).unwrap_or_else(|_| serde_json::Value::Null)
-                })
+                .map(|r| serde_json::to_value(r).unwrap_or_else(|_| serde_json::Value::Null))
                 .collect();
             crate::balloonerismm_api::SearchPage {
                 page: p.page,
@@ -1521,7 +1515,10 @@ fn find_best_match<'a>(
     if let Some((item, score)) = scored.first() {
         let matched_title = item.title.as_deref().unwrap_or("?");
         let tmdb_id = item.id;
-        println!("[TMDB] Best match: \"{}\" (score: {:.1}, tmdb_id: {})", matched_title, score, tmdb_id);
+        println!(
+            "[TMDB] Best match: \"{}\" (score: {:.1}, tmdb_id: {})",
+            matched_title, score, tmdb_id
+        );
     }
 
     scored.first().map(|(item, _)| *item)
@@ -1557,15 +1554,23 @@ fn create_metadata_from_item(
     // Try to get poster first, then backdrop - use organized caching
     let mut poster_path = if let Some(ref poster) = item.poster_path {
         println!("[TMDB]   -> Has poster: {}", poster);
-        let result = cache_image_organized(poster, image_cache_dir, &found_title, image_type.clone())
-            .or_else(|| cache_image_with_fallback(poster, image_cache_dir));
-        println!("[TMDB] Poster download for \"{}\": {:?}", found_title, result);
+        let result =
+            cache_image_organized(poster, image_cache_dir, &found_title, image_type.clone())
+                .or_else(|| cache_image_with_fallback(poster, image_cache_dir));
+        println!(
+            "[TMDB] Poster download for \"{}\": {:?}",
+            found_title, result
+        );
         result
     } else if let Some(ref backdrop) = item.backdrop_path {
         println!("[TMDB]   -> No poster, using backdrop: {}", backdrop);
-        let result = cache_image_organized(backdrop, image_cache_dir, &found_title, image_type.clone())
-            .or_else(|| cache_image_with_fallback(backdrop, image_cache_dir));
-        println!("[TMDB] Poster download for \"{}\": {:?}", found_title, result);
+        let result =
+            cache_image_organized(backdrop, image_cache_dir, &found_title, image_type.clone())
+                .or_else(|| cache_image_with_fallback(backdrop, image_cache_dir));
+        println!(
+            "[TMDB] Poster download for \"{}\": {:?}",
+            found_title, result
+        );
         result
     } else {
         println!("[TMDB]   -> No poster or backdrop available");
@@ -1607,10 +1612,11 @@ fn create_metadata_from_item(
         .filter(|name| !name.is_empty());
 
     // Extract IMDB ID: movie responses have it directly, TV responses have it in external_ids
-    let imdb_id = item
-        .imdb_id
-        .clone()
-        .or_else(|| item.external_ids.as_ref().and_then(|ids| ids.imdb_id.clone()));
+    let imdb_id = item.imdb_id.clone().or_else(|| {
+        item.external_ids
+            .as_ref()
+            .and_then(|ids| ids.imdb_id.clone())
+    });
 
     let mut imdb_image_url: Option<String> = None;
 
@@ -1626,22 +1632,29 @@ fn create_metadata_from_item(
         if let Ok(imgs) = crate::balloonerismm_api::get_images(kind, id) {
             if let Some(img_url) = imgs.pick_best_poster_url() {
                 println!("[BALLOON]   -> Got poster: {}", img_url);
-                if let Some(cached) = cache_imdb_image(
-                    &img_url,
-                    std::path::Path::new(image_cache_dir),
-                    &image_type,
-                ) {
+                if let Some(cached) =
+                    cache_imdb_image(&img_url, std::path::Path::new(image_cache_dir), &image_type)
+                {
                     if had_tmdb_poster {
-                        println!("[BALLOON]   -> Overriding TMDB poster for \"{}\"", found_title);
+                        println!(
+                            "[BALLOON]   -> Overriding TMDB poster for \"{}\"",
+                            found_title
+                        );
                     }
                     poster_path = Some(cached);
                 }
                 imdb_image_url = Some(img_url);
             } else {
-                println!("[BALLOON]   -> no posters/backdrops returned for \"{}\"", found_title);
+                println!(
+                    "[BALLOON]   -> no posters/backdrops returned for \"{}\"",
+                    found_title
+                );
             }
         } else {
-            println!("[BALLOON]   -> /images request failed for \"{}\"", found_title);
+            println!(
+                "[BALLOON]   -> /images request failed for \"{}\"",
+                found_title
+            );
         }
     }
 
@@ -1690,7 +1703,10 @@ pub fn fetch_metadata_by_id(
 ) -> Result<TmdbMetadata, Box<dyn std::error::Error + Send + Sync>> {
     let (tmdb_id, source) = extract_id_from_input(id_or_url);
 
-    println!("[TMDB] fetch_metadata_by_id: type={}, id={}", media_type, tmdb_id);
+    println!(
+        "[TMDB] fetch_metadata_by_id: type={}, id={}",
+        media_type, tmdb_id
+    );
     println!("[TMDB] Fetching by ID: {} (source: {})", tmdb_id, source);
 
     // Keep Fix Match responsive: use shorter request timeout and fewer retries.
@@ -1744,13 +1760,19 @@ pub fn fetch_metadata_by_id(
         }
         let item: TmdbItem = alt_response.json()?;
         let metadata = create_metadata_from_item_required(&item, image_cache_dir, alt_type)?;
-        println!("[TMDB] Got metadata: title=\"{}\", poster={:?}, imdb_id={:?}", metadata.title, metadata.poster_path, metadata.imdb_id);
+        println!(
+            "[TMDB] Got metadata: title=\"{}\", poster={:?}, imdb_id={:?}",
+            metadata.title, metadata.poster_path, metadata.imdb_id
+        );
         return Ok(metadata);
     }
 
     let item: TmdbItem = response.json()?;
     let metadata = create_metadata_from_item_required(&item, image_cache_dir, media_type)?;
-    println!("[TMDB] Got metadata: title=\"{}\", poster={:?}, imdb_id={:?}", metadata.title, metadata.poster_path, metadata.imdb_id);
+    println!(
+        "[TMDB] Got metadata: title=\"{}\", poster={:?}, imdb_id={:?}",
+        metadata.title, metadata.poster_path, metadata.imdb_id
+    );
     Ok(metadata)
 }
 
@@ -1765,7 +1787,9 @@ pub fn fetch_metadata_by_id_with_fallback(
     let (id, source) = extract_id_from_input(id_or_url);
 
     match pick_source(api_key) {
-        MetadataSource::Tmdb => fetch_metadata_by_id(api_key, id_or_url, media_type, image_cache_dir),
+        MetadataSource::Tmdb => {
+            fetch_metadata_by_id(api_key, id_or_url, media_type, image_cache_dir)
+        }
         MetadataSource::Cinemeta => {
             if source != "imdb" {
                 return Err(format!(
@@ -1824,9 +1848,9 @@ fn fetch_metadata_by_imdb_id(
             .ok()
             .and_then(|imgs| imgs.pick_best_poster_url());
         let imdb_image_url = poster_url.clone();
-        let poster_path = poster_url
-            .as_deref()
-            .and_then(|url| cache_imdb_image(url, std::path::Path::new(image_cache_dir), &image_type));
+        let poster_path = poster_url.as_deref().and_then(|url| {
+            cache_imdb_image(url, std::path::Path::new(image_cache_dir), &image_type)
+        });
 
         // TV credits — cast (top 8) and "director" slot (an Executive Producer or Creator if present).
         let credits = crate::balloonerismm_api::get_credits("tv", id).ok();
@@ -1844,21 +1868,25 @@ fn fetch_metadata_by_imdb_id(
             })
             .filter(|v| !v.is_empty())
             .map(|v| v.join(", "));
-        let director = credits.as_ref().and_then(|c| c.crew.as_ref()).and_then(|crew| {
-            crew.iter()
-                .find(|m| {
-                    m.job.as_deref()
-                        .map(|j| {
-                            let j = j.to_ascii_lowercase();
-                            j.contains("creator") || j.contains("showrunner")
-                        })
-                        .unwrap_or(false)
-                })
-                .or_else(|| crew.first())
-                .and_then(|m| m.name.clone())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        });
+        let director = credits
+            .as_ref()
+            .and_then(|c| c.crew.as_ref())
+            .and_then(|crew| {
+                crew.iter()
+                    .find(|m| {
+                        m.job
+                            .as_deref()
+                            .map(|j| {
+                                let j = j.to_ascii_lowercase();
+                                j.contains("creator") || j.contains("showrunner")
+                            })
+                            .unwrap_or(false)
+                    })
+                    .or_else(|| crew.first())
+                    .and_then(|m| m.name.clone())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            });
 
         return Ok(TmdbMetadata {
             title: t
@@ -1915,17 +1943,21 @@ fn fetch_metadata_by_imdb_id(
         })
         .filter(|v| !v.is_empty())
         .map(|v| v.join(", "));
-    let director = credits.as_ref().and_then(|c| c.crew.as_ref()).and_then(|crew| {
-        crew.iter()
-            .find(|m| {
-                m.job.as_deref()
-                    .map(|j| j.eq_ignore_ascii_case("Director"))
-                    .unwrap_or(false)
-            })
-            .and_then(|m| m.name.clone())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    });
+    let director = credits
+        .as_ref()
+        .and_then(|c| c.crew.as_ref())
+        .and_then(|crew| {
+            crew.iter()
+                .find(|m| {
+                    m.job
+                        .as_deref()
+                        .map(|j| j.eq_ignore_ascii_case("Director"))
+                        .unwrap_or(false)
+                })
+                .and_then(|m| m.name.clone())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
 
     Ok(TmdbMetadata {
         title: m
@@ -2077,8 +2109,16 @@ pub fn cache_imdb_image(
         // Extract a unique hash from the URL to avoid filename collisions
         let url_hash = {
             let hash = url.split('/').last().unwrap_or("unknown");
-            let safe: String = hash.chars().filter(|c| c.is_alphanumeric()).take(20).collect();
-            if safe.is_empty() { "unknown".to_string() } else { safe }
+            let safe: String = hash
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .take(20)
+                .collect();
+            if safe.is_empty() {
+                "unknown".to_string()
+            } else {
+                safe
+            }
         };
         let filename = match image_type {
             ImageType::SeriesBanner => {
@@ -2141,7 +2181,10 @@ pub fn cache_image_organized(
     title: &str,
     image_type: ImageType,
 ) -> Option<String> {
-    println!("[TMDB] Caching image: {} (type: {:?})", image_path, image_type);
+    println!(
+        "[TMDB] Caching image: {} (type: {:?})",
+        image_path, image_type
+    );
 
     let slug = create_slug(title);
     let source_tag = image_cache_tag(image_path);
@@ -2460,9 +2503,13 @@ pub fn fetch_season_episodes_with_fallback(
         let season = crate::balloonerismm_api::get_season(trimmed, season_number.max(1))
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
         let season_poster_url = season.poster_path.clone();
-        let poster_path = season_poster_url
-            .as_deref()
-            .and_then(|url| cache_imdb_image(url, std::path::Path::new(image_cache_dir), &ImageType::SeriesBanner));
+        let poster_path = season_poster_url.as_deref().and_then(|url| {
+            cache_imdb_image(
+                url,
+                std::path::Path::new(image_cache_dir),
+                &ImageType::SeriesBanner,
+            )
+        });
 
         let episodes: Vec<TmdbEpisodeInfo> = season
             .episodes
@@ -2474,18 +2521,16 @@ pub fn fetch_season_episodes_with_fallback(
                 season_number: e.season_number.unwrap_or(season_number),
                 name: e.name.unwrap_or_else(|| "(untitled)".to_string()),
                 overview: e.overview,
-                still_path: e
-                    .still_path
-                    .and_then(|url| {
-                        cache_imdb_image(
-                            &url,
-                            std::path::Path::new(image_cache_dir),
-                            &ImageType::EpisodeBanner {
-                                season: e.season_number.unwrap_or(season_number),
-                                episode: e.episode_number.unwrap_or(0),
-                            },
-                        )
-                    }),
+                still_path: e.still_path.and_then(|url| {
+                    cache_imdb_image(
+                        &url,
+                        std::path::Path::new(image_cache_dir),
+                        &ImageType::EpisodeBanner {
+                            season: e.season_number.unwrap_or(season_number),
+                            episode: e.episode_number.unwrap_or(0),
+                        },
+                    )
+                }),
                 air_date: e.air_date,
                 vote_average: e.vote_average,
             })
@@ -2507,7 +2552,13 @@ pub fn fetch_season_episodes_with_fallback(
     if api_key.trim().is_empty() {
         return Err("[BALLOON] cannot resolve TMDB numeric id without an API key".into());
     }
-    fetch_season_episodes(api_key, trimmed, season_number, series_title, image_cache_dir)
+    fetch_season_episodes(
+        api_key,
+        trimmed,
+        season_number,
+        series_title,
+        image_cache_dir,
+    )
 }
 
 /// Fetch and cache all episode metadata for a TV series
@@ -2730,11 +2781,7 @@ pub fn fetch_owned_episodes_only(
 
 /// Lightweight lookup: fetch just the IMDB ID for a given TMDB ID + media type.
 /// Returns None on any failure (non-critical path).
-pub fn fetch_imdb_id(
-    api_key: &str,
-    tmdb_id: i64,
-    media_type: &str,
-) -> Option<String> {
+pub fn fetch_imdb_id(api_key: &str, tmdb_id: i64, media_type: &str) -> Option<String> {
     let url = build_tmdb_url(
         &format!("/{}/{}", media_type, tmdb_id),
         api_key,
@@ -2751,8 +2798,11 @@ pub fn fetch_imdb_id(
     let item: TmdbItem = response.json().ok()?;
 
     // Movie responses have imdb_id directly, TV responses have it in external_ids
-    item.imdb_id
-        .or_else(|| item.external_ids.as_ref().and_then(|ids| ids.imdb_id.clone()))
+    item.imdb_id.or_else(|| {
+        item.external_ids
+            .as_ref()
+            .and_then(|ids| ids.imdb_id.clone())
+    })
 }
 
 #[cfg(test)]
@@ -2871,7 +2921,11 @@ mod tests {
     #[test]
     fn title_similarity_partial_overlap() {
         let score = title_similarity("Star Wars", "Star Trek");
-        assert!(score > 0.3 && score < 1.0, "expected mid-range, got {}", score);
+        assert!(
+            score > 0.3 && score < 1.0,
+            "expected mid-range, got {}",
+            score
+        );
     }
 
     #[test]
@@ -3052,7 +3106,8 @@ mod tests {
 
     #[test]
     fn extract_id_from_input_tmdb_tv_url() {
-        let (id, source) = extract_id_from_input("https://www.themoviedb.org/tv/1399-game-of-thrones");
+        let (id, source) =
+            extract_id_from_input("https://www.themoviedb.org/tv/1399-game-of-thrones");
         assert_eq!(id, "1399");
         assert_eq!(source, "tmdb");
     }
@@ -3072,7 +3127,11 @@ mod tests {
             title: Some(title.to_string()),
             original_title: Some(title.to_string()),
             overview: None,
-            poster_path: if poster { Some("/poster.jpg".to_string()) } else { None },
+            poster_path: if poster {
+                Some("/poster.jpg".to_string())
+            } else {
+                None
+            },
             backdrop_path: None,
             release_date: Some(format!("{}-01-01", year)),
             vote_average: Some(7.0),
@@ -3220,7 +3279,10 @@ mod tests {
 
     #[test]
     fn image_type_clone() {
-        let t = ImageType::EpisodeBanner { season: 1, episode: 5 };
+        let t = ImageType::EpisodeBanner {
+            season: 1,
+            episode: 5,
+        };
         let cloned = t.clone();
         match cloned {
             ImageType::EpisodeBanner { season, episode } => {
@@ -3432,12 +3494,17 @@ mod tests {
             runtime: Some(136),
             credits: Some(TmdbCredits {
                 cast: Some(vec![
-                    TmdbCastMember { name: Some("Keanu Reeves".to_string()) },
-                    TmdbCastMember { name: Some("Laurence Fishburne".to_string()) },
+                    TmdbCastMember {
+                        name: Some("Keanu Reeves".to_string()),
+                    },
+                    TmdbCastMember {
+                        name: Some("Laurence Fishburne".to_string()),
+                    },
                 ]),
-                crew: Some(vec![
-                    TmdbCrewMember { job: Some("Director".to_string()), name: Some("Lana Wachowski".to_string()) },
-                ]),
+                crew: Some(vec![TmdbCrewMember {
+                    job: Some("Director".to_string()),
+                    name: Some("Lana Wachowski".to_string()),
+                }]),
             }),
             imdb_id: Some("tt0133093".to_string()),
             external_ids: None,
@@ -3533,7 +3600,8 @@ mod tests {
 
     #[test]
     fn extract_id_from_input_tmdb_url_with_trailing_slash() {
-        let (id, source) = extract_id_from_input("https://www.themoviedb.org/movie/603-the-matrix/");
+        let (id, source) =
+            extract_id_from_input("https://www.themoviedb.org/movie/603-the-matrix/");
         assert_eq!(id, "603");
         assert_eq!(source, "tmdb");
     }
@@ -3747,9 +3815,18 @@ mod tests {
             credits: Some(TmdbCredits {
                 cast: Some(vec![]),
                 crew: Some(vec![
-                    TmdbCrewMember { job: Some("Producer".to_string()), name: Some("Producer Name".to_string()) },
-                    TmdbCrewMember { job: Some("Director".to_string()), name: Some("Director Name".to_string()) },
-                    TmdbCrewMember { job: Some("Director".to_string()), name: Some("  ".to_string()) }, // whitespace only, skipped
+                    TmdbCrewMember {
+                        job: Some("Producer".to_string()),
+                        name: Some("Producer Name".to_string()),
+                    },
+                    TmdbCrewMember {
+                        job: Some("Director".to_string()),
+                        name: Some("Director Name".to_string()),
+                    },
+                    TmdbCrewMember {
+                        job: Some("Director".to_string()),
+                        name: Some("  ".to_string()),
+                    }, // whitespace only, skipped
                 ]),
             }),
             imdb_id: None,
@@ -3818,10 +3895,16 @@ mod tests {
             runtime: None,
             credits: Some(TmdbCredits {
                 cast: Some(vec![
-                    TmdbCastMember { name: Some("  Actor One  ".to_string()) },
+                    TmdbCastMember {
+                        name: Some("  Actor One  ".to_string()),
+                    },
                     TmdbCastMember { name: None },
-                    TmdbCastMember { name: Some("".to_string()) },
-                    TmdbCastMember { name: Some("Actor Two".to_string()) },
+                    TmdbCastMember {
+                        name: Some("".to_string()),
+                    },
+                    TmdbCastMember {
+                        name: Some("Actor Two".to_string()),
+                    },
                 ]),
                 crew: None,
             }),
@@ -3851,7 +3934,12 @@ mod tests {
         let _ = std::fs::create_dir_all(&tmp);
         // cache_image_organized will try to download (fail in test), but we test the path structure
         // by calling with a path that won't exist on disk - it should return None gracefully
-        let result = cache_image_organized("/test.jpg", tmp.to_str().unwrap(), "My Movie", ImageType::MovieBanner);
+        let result = cache_image_organized(
+            "/test.jpg",
+            tmp.to_str().unwrap(),
+            "My Movie",
+            ImageType::MovieBanner,
+        );
         // May return None due to download failure, but shouldn't panic
         assert!(result.is_some() || result.is_none());
         let _ = std::fs::remove_dir_all(&tmp);
@@ -3861,7 +3949,12 @@ mod tests {
     fn cache_image_organized_series_banner_creates_subfolder() {
         let tmp = std::env::temp_dir().join("tmdb_test_img_org_series");
         let _ = std::fs::create_dir_all(&tmp);
-        let result = cache_image_organized("/test.jpg", tmp.to_str().unwrap(), "My Show", ImageType::SeriesBanner);
+        let result = cache_image_organized(
+            "/test.jpg",
+            tmp.to_str().unwrap(),
+            "My Show",
+            ImageType::SeriesBanner,
+        );
         // Subfolder should have been created (even if download fails)
         let slug = create_slug("My Show");
         let _subfolder = tmp.join(&slug);
@@ -3878,7 +3971,10 @@ mod tests {
             "/ep_still.jpg",
             tmp.to_str().unwrap(),
             "Show Name",
-            ImageType::EpisodeBanner { season: 2, episode: 5 },
+            ImageType::EpisodeBanner {
+                season: 2,
+                episode: 5,
+            },
         );
         if let Some(path) = result {
             assert!(path.contains("s2e5"));
@@ -3902,7 +3998,12 @@ mod tests {
         let file_path = subfolder.join(&filename);
         let _ = std::fs::write(&file_path, vec![0u8; 200]);
 
-        let result = cache_image_organized("/existing.jpg", tmp.to_str().unwrap(), "Cached Show", ImageType::SeriesBanner);
+        let result = cache_image_organized(
+            "/existing.jpg",
+            tmp.to_str().unwrap(),
+            "Cached Show",
+            ImageType::SeriesBanner,
+        );
         assert!(result.is_some());
         let path = result.unwrap();
         assert!(path.contains(&slug));
@@ -3921,7 +4022,12 @@ mod tests {
         // Write a tiny file (< 100 bytes) to simulate corruption
         let _ = std::fs::write(&file_path, vec![0u8; 10]);
 
-        let result = cache_image_organized("/corrupt.jpg", tmp.to_str().unwrap(), "Movie", ImageType::MovieBanner);
+        let result = cache_image_organized(
+            "/corrupt.jpg",
+            tmp.to_str().unwrap(),
+            "Movie",
+            ImageType::MovieBanner,
+        );
         // Corrupt file should be deleted; result depends on network
         assert!(result.is_some() || result.is_none());
         let _ = std::fs::remove_dir_all(&tmp);
@@ -3963,7 +4069,10 @@ mod tests {
         let result: TmdbFindResult = serde_json::from_str(json).unwrap();
         assert!(result.movie_results.is_empty());
         assert_eq!(result.tv_results.len(), 1);
-        assert_eq!(result.tv_results[0].title, Some("Game of Thrones".to_string()));
+        assert_eq!(
+            result.tv_results[0].title,
+            Some("Game of Thrones".to_string())
+        );
     }
 
     #[test]
@@ -4121,7 +4230,11 @@ mod tests {
     fn title_similarity_word_overlap_jaccard() {
         let score = title_similarity("Star Wars Episode", "Star Trek Episode");
         // 2 of 4 unique words overlap
-        assert!(score > 0.3 && score < 0.8, "expected mid-range, got {}", score);
+        assert!(
+            score > 0.3 && score < 0.8,
+            "expected mid-range, got {}",
+            score
+        );
     }
 
     // ── extract_title_variations edge cases ────────────────────────────
@@ -4238,7 +4351,8 @@ mod tests {
 
     #[test]
     fn tmdb_item_original_name_alias() {
-        let json = r#"{"id": 999, "original_name": "Original Show Name", "first_air_date": "2020-01-01"}"#;
+        let json =
+            r#"{"id": 999, "original_name": "Original Show Name", "first_air_date": "2020-01-01"}"#;
         let item: TmdbItem = serde_json::from_str(json).unwrap();
         assert_eq!(item.original_title, Some("Original Show Name".to_string()));
         assert_eq!(item.release_date, Some("2020-01-01".to_string()));
@@ -4535,9 +4649,11 @@ mod tests {
         }"#;
         let item: TmdbItem = serde_json::from_str(json).unwrap();
         // Replicate fetch_imdb_id logic
-        let imdb = item
-            .imdb_id
-            .or_else(|| item.external_ids.as_ref().and_then(|ids| ids.imdb_id.clone()));
+        let imdb = item.imdb_id.or_else(|| {
+            item.external_ids
+                .as_ref()
+                .and_then(|ids| ids.imdb_id.clone())
+        });
         assert_eq!(imdb, Some("tt0944947".to_string()));
     }
 
@@ -4545,9 +4661,11 @@ mod tests {
     fn fetch_imdb_id_from_direct_field() {
         let json = r#"{"id": 603, "title": "The Matrix", "imdb_id": "tt0133093"}"#;
         let item: TmdbItem = serde_json::from_str(json).unwrap();
-        let imdb = item
-            .imdb_id
-            .or_else(|| item.external_ids.as_ref().and_then(|ids| ids.imdb_id.clone()));
+        let imdb = item.imdb_id.or_else(|| {
+            item.external_ids
+                .as_ref()
+                .and_then(|ids| ids.imdb_id.clone())
+        });
         assert_eq!(imdb, Some("tt0133093".to_string()));
     }
 
@@ -4555,9 +4673,11 @@ mod tests {
     fn fetch_imdb_id_returns_none_when_absent() {
         let json = r#"{"id": 999, "title": "No IMDB"}"#;
         let item: TmdbItem = serde_json::from_str(json).unwrap();
-        let imdb = item
-            .imdb_id
-            .or_else(|| item.external_ids.as_ref().and_then(|ids| ids.imdb_id.clone()));
+        let imdb = item.imdb_id.or_else(|| {
+            item.external_ids
+                .as_ref()
+                .and_then(|ids| ids.imdb_id.clone())
+        });
         assert!(imdb.is_none());
     }
 
@@ -4568,7 +4688,11 @@ mod tests {
         // Replicate the url_hash logic from cache_imdb_image
         let url = "https://m.media-amazon.com/images/M/MV5BMTc5MDE2ODcwNV5BMl5BanBnXkFtZTgwMzI2NzQ2NzM@.jpg";
         let hash = url.split('/').last().unwrap_or("unknown");
-        let safe: String = hash.chars().filter(|c| c.is_alphanumeric()).take(20).collect();
+        let safe: String = hash
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .take(20)
+            .collect();
         assert!(!safe.is_empty());
         assert!(safe.len() <= 20);
     }
@@ -4607,9 +4731,17 @@ mod tests {
         // Edge case: url ends with "/" or empty segment
         let url = "https://example.com/";
         let hash = url.split('/').last().unwrap_or("unknown");
-        let safe: String = hash.chars().filter(|c| c.is_alphanumeric()).take(20).collect();
+        let safe: String = hash
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .take(20)
+            .collect();
         // Empty => fallback to "unknown"
-        let final_hash = if safe.is_empty() { "unknown".to_string() } else { safe };
+        let final_hash = if safe.is_empty() {
+            "unknown".to_string()
+        } else {
+            safe
+        };
         assert_eq!(final_hash, "unknown");
     }
 

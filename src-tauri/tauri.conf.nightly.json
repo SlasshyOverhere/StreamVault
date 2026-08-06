@@ -1,16 +1,16 @@
 {
-  "package": {
-    "productName": "SlasshyVault-Nightly"
+  "productName": "SlasshyVault-Nightly",
+  "bundle": {
+    "identifier": "com.slasshyvault.app.nightly"
   },
-  "tauri": {
-    "bundle": {
-      "identifier": "com.slasshyvault.app.nightly"
-    },
+  "plugins": {
     "updater": {
       "endpoints": [
         "https://github.com/SlasshyOverhere/SlasshyVault/releases/download/nightly/latest.json"
       ]
-    },
+    }
+  },
+  "app": {
     "windows": [
       {
         "label": "main-nightly",

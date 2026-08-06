@@ -3,7 +3,8 @@ use std::sync::{LazyLock, Mutex};
 
 const MAX_LOG_ENTRIES: usize = 2000;
 
-static LOG_BUFFER: LazyLock<Mutex<VecDeque<String>>> = LazyLock::new(|| Mutex::new(VecDeque::with_capacity(MAX_LOG_ENTRIES)));
+static LOG_BUFFER: LazyLock<Mutex<VecDeque<String>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(MAX_LOG_ENTRIES)));
 
 pub fn push(msg: String) {
     if let Ok(mut buf) = LOG_BUFFER.lock() {

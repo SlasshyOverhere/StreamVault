@@ -1,21 +1,24 @@
-// Prevents additional console window on Windows in release, DO NOT REMOVE!!
+// Prevents additional console window on WebviewWindows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod archive_manager;
+mod balloonerismm_api;
+mod cf_relay;
+mod cinemeta_api;
 mod config;
 mod database;
 mod direct_link_manager;
 mod download_manager;
-mod http_client;
 mod gdrive;
 mod gdrive_stream_proxy;
+mod http_client;
+mod imdb_api;
 mod log_buffer;
 mod media_manager;
 mod mpv_ipc;
-mod cf_relay;
-mod balloonerismm_api;
-mod cinemeta_api;
-mod imdb_api;
+mod remote_source;
+mod remote_stream_proxy;
+mod stremio;
 mod tmdb;
 mod transcoder;
 mod watch_together;
@@ -23,13 +26,14 @@ mod watch_together_mpv;
 mod zip_manager;
 mod zip_parser;
 mod zip_stream_proxy;
-mod remote_stream_proxy;
-mod remote_source;
-mod stremio;
 
 mod stream_cache;
 
+use tauri::menu::{Menu, MenuBuilder};
+
+use tauri::tray::TrayIconBuilder;
 use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_deep_link::DeepLinkExt;
 
 use chrono::{
     DateTime, Datelike, Local, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone,
@@ -43,21 +47,21 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
-use tauri::api::notification::Notification as TauriNotification;
-use tauri::{
-    AppHandle, CustomMenuItem, Manager, State, SystemTray, SystemTrayEvent, SystemTrayMenu,
-    SystemTrayMenuItem, Window, WindowBuilder, WindowUrl,
-};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder, WebviewUrl, WindowEvent};
 use uuid::Uuid;
 
 // ponytail: LazyLock replaces lazy_static dependency
-static OAUTH_CODE_CHANNEL: LazyLock<(Mutex<mpsc::Sender<String>>, Mutex<mpsc::Receiver<String>>)> = LazyLock::new(|| {
-    let (tx, rx) = mpsc::channel();
-    (Mutex::new(tx), Mutex::new(rx))
-});
-static RECENT_UI_NOTIFICATIONS: LazyLock<Mutex<HashMap<String, std::time::Instant>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-static RUNNING_ADDON_PROCESS: LazyLock<Mutex<Option<tokio::process::Child>>> = LazyLock::new(|| Mutex::new(None));
-static ADDON_STDOUT_TASK: LazyLock<Mutex<Option<tokio::task::JoinHandle<()>>>> = LazyLock::new(|| Mutex::new(None));
+static OAUTH_CODE_CHANNEL: LazyLock<(Mutex<mpsc::Sender<String>>, Mutex<mpsc::Receiver<String>>)> =
+    LazyLock::new(|| {
+        let (tx, rx) = mpsc::channel();
+        (Mutex::new(tx), Mutex::new(rx))
+    });
+static RECENT_UI_NOTIFICATIONS: LazyLock<Mutex<HashMap<String, std::time::Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static RUNNING_ADDON_PROCESS: LazyLock<Mutex<Option<tokio::process::Child>>> =
+    LazyLock::new(|| Mutex::new(None));
+static ADDON_STDOUT_TASK: LazyLock<Mutex<Option<tokio::task::JoinHandle<()>>>> =
+    LazyLock::new(|| Mutex::new(None));
 static ADDON_WATCHDOG_RUNNING: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
 static ADDON_LOG_HISTORY: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 // Retry counter for the watchdog — resets on successful health check
@@ -396,10 +400,15 @@ async fn search_all_libraries(
 ) -> Result<Vec<database::MediaItem>, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let mut results = Vec::new();
-    for (db_type, is_cloud) in [("movie", Some(false)), ("tvshow", Some(false)), ("movie", Some(true)), ("tvshow", Some(true))] {
+    for (db_type, is_cloud) in [
+        ("movie", Some(false)),
+        ("tvshow", Some(false)),
+        ("movie", Some(true)),
+        ("tvshow", Some(true)),
+    ] {
         results.extend(
             db.get_library_filtered(db_type, Some(search.as_str()), is_cloud)
-                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?,
         );
     }
     // Deduplicate by id
@@ -611,9 +620,7 @@ async fn get_recent_watch_activities(
 
 // Get all analytics data for the analytics dashboard
 #[tauri::command]
-async fn get_analytics_data(
-    state: State<'_, AppState>,
-) -> Result<database::AnalyticsData, String> {
+async fn get_analytics_data(state: State<'_, AppState>) -> Result<database::AnalyticsData, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.get_analytics_data().map_err(|e| e.to_string())
 }
@@ -693,7 +700,8 @@ async fn gdrive_complete_auth(
     let expected_nonce = state.oauth_nonce.lock().unwrap().take();
 
     // Wait for tokens from backend (it redirects to localhost with tokens)
-    let tokens = gdrive::wait_for_oauth_callback_with_nonce(&listener, expected_nonce.as_deref()).await?;
+    let tokens =
+        gdrive::wait_for_oauth_callback_with_nonce(&listener, expected_nonce.as_deref()).await?;
     println!("[GDRIVE] Received tokens from backend (nonce verified)");
 
     // Store tokens
@@ -901,7 +909,7 @@ fn auto_merge_duplicate_tvshows(db: &database::Database, source: &str) -> i32 {
 #[tauri::command]
 async fn gdrive_scan_folder(
     state: State<'_, AppState>,
-    window: Window,
+    window: WebviewWindow,
     folder_id: String,
     folder_name: String,
 ) -> Result<CloudIndexResult, String> {
@@ -1422,7 +1430,10 @@ async fn gdrive_scan_folder(
 
     // Add TAR archive skip reasons
     for archive_name in &unsupported_archives {
-        skipped_reasons.push(format!("{} — TAR archives are not supported (requires sequential read)", archive_name));
+        skipped_reasons.push(format!(
+            "{} — TAR archives are not supported (requires sequential read)",
+            archive_name
+        ));
     }
     let skipped_count = skipped_count + unsupported_archives.len();
 
@@ -1432,7 +1443,8 @@ async fn gdrive_scan_folder(
         let status_msg = if zip_indexed_count > 0 {
             format!(
                 "Finished processing {} ZIP archive(s). {} episode(s) added to your library.",
-                zip_files_detected.len(), zip_indexed_count
+                zip_files_detected.len(),
+                zip_indexed_count
             )
         } else {
             format!(
@@ -1442,7 +1454,11 @@ async fn gdrive_scan_folder(
         };
         emit_zip_processing_event(
             &window,
-            if zip_indexed_count > 0 { "complete" } else { "warning" },
+            if zip_indexed_count > 0 {
+                "complete"
+            } else {
+                "warning"
+            },
             zip_files_detected.len(),
             archive_name,
             None,
@@ -1502,7 +1518,7 @@ async fn gdrive_scan_folder(
 #[tauri::command]
 async fn gdrive_delete_folder_media(
     state: State<'_, AppState>,
-    window: Window,
+    window: WebviewWindow,
     folder_id: String,
 ) -> Result<ApiResponse, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
@@ -1538,7 +1554,7 @@ async fn add_cloud_folder(
 #[tauri::command]
 async fn remove_cloud_folder(
     state: State<'_, AppState>,
-    window: Window,
+    window: WebviewWindow,
     folder_id: String,
 ) -> Result<ApiResponse, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
@@ -1581,7 +1597,7 @@ async fn get_cloud_folders(state: State<'_, AppState>) -> Result<Vec<serde_json:
 #[tauri::command]
 async fn scan_all_cloud_folders(
     state: State<'_, AppState>,
-    window: Window,
+    window: WebviewWindow,
 ) -> Result<CloudIndexResult, String> {
     // Acquire scan lock to prevent concurrent scans from racing
     let _scan_lock = ScanLock::try_acquire(&state.is_scanning).ok_or_else(|| {
@@ -1699,20 +1715,23 @@ async fn scan_all_cloud_folders(
             for file in files {
                 if db.cloud_file_exists(&file.id) {
                     skipped_count += 1;
-                    skipped_reasons.push(format!("{} — already indexed (cloud ID exists)", file.name));
+                    skipped_reasons
+                        .push(format!("{} — already indexed (cloud ID exists)", file.name));
                     continue;
                 }
 
                 if is_zip_drive_item(&file) {
                     if !zip_indexing_enabled {
                         skipped_count += 1;
-                        skipped_reasons.push(format!("{} — ZIP indexing disabled in settings", file.name));
+                        skipped_reasons
+                            .push(format!("{} — ZIP indexing disabled in settings", file.name));
                         continue;
                     }
 
                     let Some(access_token) = zip_access_token.as_deref() else {
                         skipped_count += 1;
-                        skipped_reasons.push(format!("{} — ZIP access token unavailable", file.name));
+                        skipped_reasons
+                            .push(format!("{} — ZIP access token unavailable", file.name));
                         continue;
                     };
 
@@ -1739,7 +1758,8 @@ async fn scan_all_cloud_folders(
                         Err(error) => {
                             println!("[ZIP] Failed to index '{}': {}", file.name, error);
                             skipped_count += 1;
-                            skipped_reasons.push(format!("{} — ZIP indexing error: {}", file.name, error));
+                            skipped_reasons
+                                .push(format!("{} — ZIP indexing error: {}", file.name, error));
                             continue;
                         }
                     }
@@ -1898,7 +1918,10 @@ async fn scan_all_cloud_folders(
                         .is_err()
                     {
                         skipped_count += 1;
-                        skipped_reasons.push(format!("{} — database insert failed for episode", file.name));
+                        skipped_reasons.push(format!(
+                            "{} — database insert failed for episode",
+                            file.name
+                        ));
                         continue;
                     }
 
@@ -1967,7 +1990,8 @@ async fn scan_all_cloud_folders(
                         .is_err()
                     {
                         skipped_count += 1;
-                        skipped_reasons.push(format!("{} — database insert failed for movie", file.name));
+                        skipped_reasons
+                            .push(format!("{} — database insert failed for movie", file.name));
                         continue;
                     }
 
@@ -1976,7 +2000,13 @@ async fn scan_all_cloud_folders(
                 }
             }
 
-            Ok((indexed_count, skipped_count, movies_count, tv_count, skipped_reasons))
+            Ok((
+                indexed_count,
+                skipped_count,
+                movies_count,
+                tv_count,
+                skipped_reasons,
+            ))
         })
         .await
         .map_err(|e| format!("Task failed: {}", e))?;
@@ -1987,7 +2017,10 @@ async fn scan_all_cloud_folders(
 
         // Add TAR archive skip reasons
         for archive_name in &unsupported_archives {
-            skipped_reasons.push(format!("{} — TAR archives are not supported (requires sequential read)", archive_name));
+            skipped_reasons.push(format!(
+                "{} — TAR archives are not supported (requires sequential read)",
+                archive_name
+            ));
         }
         total_skipped += skipped + unsupported_archives.len();
 
@@ -2055,7 +2088,7 @@ async fn scan_all_cloud_folders(
 #[tauri::command]
 async fn check_cloud_changes(
     state: State<'_, AppState>,
-    window: Window,
+    window: WebviewWindow,
 ) -> Result<CloudIndexResult, String> {
     let start_time = std::time::Instant::now();
     println!("[CLOUD CHANGES] ══════════════════════════════════════════");
@@ -2121,7 +2154,11 @@ async fn check_cloud_changes(
     let tracked_folders: std::collections::HashSet<String> = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         let folders = db.get_cloud_folders().map_err(|e| e.to_string())?;
-        folders.into_iter().filter(|(_, _, auto_scan)| *auto_scan).map(|(id, _, _)| id).collect()
+        folders
+            .into_iter()
+            .filter(|(_, _, auto_scan)| *auto_scan)
+            .map(|(id, _, _)| id)
+            .collect()
     };
 
     if tracked_folders.is_empty() {
@@ -2288,7 +2325,10 @@ async fn check_cloud_changes(
 
     // Build complete set of all descendant folder IDs under tracked folders
     // so we can detect files in subdirectories (not just immediate children)
-    println!("[CLOUD CHANGES] Building folder tree for {} tracked folder(s)...", tracked_folders.len());
+    println!(
+        "[CLOUD CHANGES] Building folder tree for {} tracked folder(s)...",
+        tracked_folders.len()
+    );
     let tree_build_start = std::time::Instant::now();
     let mut all_tracked_folder_ids: std::collections::HashSet<String> = tracked_folders.clone();
     for folder_id in &tracked_folders {
@@ -2302,7 +2342,11 @@ async fn check_cloud_changes(
         }
     }
     let tree_build_duration = tree_build_start.elapsed();
-    println!("[CLOUD CHANGES] Folder tree built in {:?} ({} total folders)", tree_build_duration, all_tracked_folder_ids.len());
+    println!(
+        "[CLOUD CHANGES] Folder tree built in {:?} ({} total folders)",
+        tree_build_duration,
+        all_tracked_folder_ids.len()
+    );
 
     // Filter to only files in our tracked folders (including subfolders)
     let files_to_index: Vec<gdrive::DriveItem> = changed_files
@@ -2351,7 +2395,17 @@ async fn check_cloud_changes(
         let skipped_reasons: Option<Vec<String>> = if unsupported_archives.is_empty() {
             None
         } else {
-            Some(unsupported_archives.iter().map(|a| format!("{} — TAR archives are not supported (requires sequential read)", a)).collect())
+            Some(
+                unsupported_archives
+                    .iter()
+                    .map(|a| {
+                        format!(
+                            "{} — TAR archives are not supported (requires sequential read)",
+                            a
+                        )
+                    })
+                    .collect(),
+            )
         };
         return Ok(CloudIndexResult {
             success: true,
@@ -2687,7 +2741,10 @@ async fn check_cloud_changes(
 
     // Add TAR archive skip reasons
     for archive_name in &unsupported_archives {
-        skipped_reasons.push(format!("{} — TAR archives are not supported (requires sequential read)", archive_name));
+        skipped_reasons.push(format!(
+            "{} — TAR archives are not supported (requires sequential read)",
+            archive_name
+        ));
     }
     let skipped_count = skipped_count + unsupported_archives.len();
     let indexed_count = indexed_items.len();
@@ -2727,7 +2784,7 @@ async fn check_cloud_changes(
         // Emit library-updated so UI refreshes immediately
         window.emit("library-updated", ()).ok();
 
-        // Send Windows notification for each item (simple format)
+        // Send WebviewWindows notification for each item (simple format)
         for title in &titles {
             dispatch_notification(
                 &window,
@@ -3066,7 +3123,7 @@ struct DeleteResponse {
 #[tauri::command]
 async fn delete_media_files(
     state: State<'_, AppState>,
-    window: Window,
+    window: WebviewWindow,
     media_ids: Vec<i64>,
     confirmed: bool,
 ) -> Result<DeleteResponse, String> {
@@ -3103,7 +3160,9 @@ async fn delete_media_files(
     let mut db_media_ids_to_delete: Vec<i64> = Vec::new();
 
     // Separate cloud and local files
-    for (id, file_path, is_cloud, cloud_file_id, _cloud_folder_id, parent_zip_id, ddl_source_id) in media_info {
+    for (id, file_path, is_cloud, cloud_file_id, _cloud_folder_id, parent_zip_id, ddl_source_id) in
+        media_info
+    {
         if is_cloud {
             if ddl_source_id.is_some() {
                 // DDL item - no cloud file to delete on Google Drive, just remove from DB
@@ -3203,9 +3262,10 @@ async fn delete_media_files(
             "[DELETE] Deleting {} cloud files from Google Drive",
             cloud_file_ids_to_delete.len()
         );
-        let delete_futures: Vec<_> = cloud_file_ids_to_delete.iter().map(|cloud_file_id| {
-            state.gdrive_client.delete_file(cloud_file_id)
-        }).collect();
+        let delete_futures: Vec<_> = cloud_file_ids_to_delete
+            .iter()
+            .map(|cloud_file_id| state.gdrive_client.delete_file(cloud_file_id))
+            .collect();
         let results = futures_util::future::join_all(delete_futures).await;
         for (cloud_file_id, result) in cloud_file_ids_to_delete.iter().zip(results) {
             match result {
@@ -3343,7 +3403,7 @@ async fn delete_media_files(
 #[tauri::command]
 async fn delete_all_media_files(
     state: State<'_, AppState>,
-    window: Window,
+    window: WebviewWindow,
     confirmed: bool,
 ) -> Result<DeleteResponse, String> {
     if !confirmed {
@@ -3368,9 +3428,10 @@ async fn delete_all_media_files(
             "[DELETE-ALL] Deleting {} cloud files from Google Drive",
             total_cloud
         );
-        let delete_futures: Vec<_> = cloud_file_ids.iter().map(|cloud_file_id| {
-            state.gdrive_client.delete_file(cloud_file_id)
-        }).collect();
+        let delete_futures: Vec<_> = cloud_file_ids
+            .iter()
+            .map(|cloud_file_id| state.gdrive_client.delete_file(cloud_file_id))
+            .collect();
         let results = futures_util::future::join_all(delete_futures).await;
         for (cloud_file_id, result) in cloud_file_ids.iter().zip(results) {
             match result {
@@ -3437,7 +3498,7 @@ async fn delete_all_media_files(
 #[tauri::command]
 async fn delete_cloud_files_by_drive_ids(
     state: State<'_, AppState>,
-    window: Window,
+    window: WebviewWindow,
     drive_file_ids: Vec<String>,
     confirmed: bool,
 ) -> Result<DeleteResponse, String> {
@@ -3448,15 +3509,19 @@ async fn delete_cloud_files_by_drive_ids(
         return Err("No files selected".to_string());
     }
 
-    println!("[DELETE-SELECTIVE] Starting deletion of {} Drive files", drive_file_ids.len());
+    println!(
+        "[DELETE-SELECTIVE] Starting deletion of {} Drive files",
+        drive_file_ids.len()
+    );
 
     let mut deleted_count = 0usize;
     let mut failed_count = 0usize;
 
     // Delete each file from Google Drive
-    let delete_futures: Vec<_> = drive_file_ids.iter().map(|drive_file_id| {
-        state.gdrive_client.delete_file(drive_file_id)
-    }).collect();
+    let delete_futures: Vec<_> = drive_file_ids
+        .iter()
+        .map(|drive_file_id| state.gdrive_client.delete_file(drive_file_id))
+        .collect();
     let results = futures_util::future::join_all(delete_futures).await;
     for (drive_file_id, result) in drive_file_ids.iter().zip(results) {
         match result {
@@ -3467,10 +3532,16 @@ async fn delete_cloud_files_by_drive_ids(
                 let is_permission_error =
                     e.contains("403") || e.contains("insufficientFilePermissions");
                 if is_permission_error {
-                    println!("[DELETE-SELECTIVE] Permission denied for {} (removing anyway)", drive_file_id);
+                    println!(
+                        "[DELETE-SELECTIVE] Permission denied for {} (removing anyway)",
+                        drive_file_id
+                    );
                     deleted_count += 1;
                 } else {
-                    println!("[DELETE-SELECTIVE] Failed to delete {}: {}", drive_file_id, e);
+                    println!(
+                        "[DELETE-SELECTIVE] Failed to delete {}: {}",
+                        drive_file_id, e
+                    );
                     failed_count += 1;
                 }
             }
@@ -3481,7 +3552,10 @@ async fn delete_cloud_files_by_drive_ids(
     match state.db.lock() {
         Ok(db) => {
             if let Err(e) = db.delete_media_by_cloud_file_ids(&drive_file_ids) {
-                println!("[DELETE-SELECTIVE] DB cleanup failed (files already deleted from Drive): {}", e);
+                println!(
+                    "[DELETE-SELECTIVE] DB cleanup failed (files already deleted from Drive): {}",
+                    e
+                );
             }
         }
         Err(e) => {
@@ -3493,7 +3567,10 @@ async fn delete_cloud_files_by_drive_ids(
     window.emit("library-updated", ()).ok();
 
     let message = if failed_count == 0 {
-        format!("Deleted {} file(s) from Google Drive and library", deleted_count)
+        format!(
+            "Deleted {} file(s) from Google Drive and library",
+            deleted_count
+        )
     } else {
         format!("Deleted {} file(s), {} failed", deleted_count, failed_count)
     };
@@ -3724,8 +3801,15 @@ async fn delete_series(
             let mut cloud_file_ids: Vec<String> = Vec::new();
             let mut local_file_paths: Vec<String> = Vec::new();
 
-            for (_id, file_path, is_cloud, cloud_file_id, _cloud_folder_id, _parent_zip_id, ddl_source_id) in
-                episode_info
+            for (
+                _id,
+                file_path,
+                is_cloud,
+                cloud_file_id,
+                _cloud_folder_id,
+                _parent_zip_id,
+                ddl_source_id,
+            ) in episode_info
             {
                 if is_cloud && ddl_source_id.is_none() {
                     if let Some(cloud_id) = cloud_file_id {
@@ -3851,8 +3935,15 @@ async fn delete_series_cloud_folder(
                     .map_err(|e| e.to_string())?
             };
 
-            for (_id, _file_path, _is_cloud, cloud_file_id, _cloud_folder_id, _parent_zip_id, ddl_source_id) in
-                episode_info
+            for (
+                _id,
+                _file_path,
+                _is_cloud,
+                cloud_file_id,
+                _cloud_folder_id,
+                _parent_zip_id,
+                ddl_source_id,
+            ) in episode_info
             {
                 if let Some(cloud_id) = cloud_file_id {
                     if ddl_source_id.is_none() {
@@ -3916,11 +4007,19 @@ async fn get_bundled_mpv_info() -> BundledMpvInfo {
 // Download bundled MPV RAR from GitHub repo, extract it, and set the path
 #[tauri::command]
 async fn download_bundled_mpv(
-    window: Window,
+    window: WebviewWindow,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    use std::io::Write;
+    if cfg!(target_os = "linux") {
+        let _ = (window, state);
+        return Err(
+            "Install MPV with your Linux package manager, then use Auto-detect or choose its path."
+                .to_string(),
+        );
+    }
+
     use futures_util::StreamExt;
+    use std::io::Write;
 
     let url = config::get_bundled_mpv_download_url();
     println!("[MPV-BUNDLED] Downloading MPV archive from: {}", url);
@@ -3966,7 +4065,8 @@ async fn download_bundled_mpv(
     let mut stream = response.bytes_stream();
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result.map_err(|e| format!("Download error: {}", e))?;
-        file.write_all(&chunk).map_err(|e| format!("Write error: {}", e))?;
+        file.write_all(&chunk)
+            .map_err(|e| format!("Write error: {}", e))?;
         downloaded += chunk.len() as u64;
 
         if total_size > 0 {
@@ -3991,19 +4091,18 @@ async fn download_bundled_mpv(
     let rar_path_str = rar_path.to_string_lossy().to_string();
     let extract_dest = mpv_dir.to_string_lossy().to_string();
 
-    let _result = tokio::task::spawn_blocking(move || {
-        extract_rar_to_dir(&rar_path_str, &extract_dest)
-    })
-    .await
-    .map_err(|e| format!("Extraction task failed: {}", e))?
-    .map_err(|e| format!("Failed to extract MPV archive: {}", e))?;
+    let _result =
+        tokio::task::spawn_blocking(move || extract_rar_to_dir(&rar_path_str, &extract_dest))
+            .await
+            .map_err(|e| format!("Extraction task failed: {}", e))?
+            .map_err(|e| format!("Failed to extract MPV archive: {}", e))?;
 
     // Clean up the RAR file after extraction
     let _ = std::fs::remove_file(&rar_path);
 
     println!("[MPV-BUNDLED] Extraction complete. Unblocking files...");
 
-    // Unblock all extracted files to prevent Windows UAC/SmartScreen prompts
+    // Unblock all extracted files to prevent WebviewWindows UAC/SmartScreen prompts
     #[cfg(windows)]
     {
         use std::process::Command;
@@ -4070,8 +4169,9 @@ fn extract_rar_to_dir(rar_path: &str, dest_dir: &str) -> Result<(), String> {
             archive = header.skip().map_err(|e| e.to_string())?;
         } else {
             if let Some(parent) = output_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create parent dir for '{}': {}", sanitized, e))?;
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    format!("Failed to create parent dir for '{}': {}", sanitized, e)
+                })?;
             }
             archive = header.extract_to(&output_path).map_err(|e| e.to_string())?;
         }
@@ -4105,7 +4205,9 @@ async fn save_config(
         merged.addon_sources = config.addon_sources.clone();
     }
     // Derive addon_url from the default source — never trust the form's stale addon_url
-    merged.addon_url = merged.addon_sources.iter()
+    merged.addon_url = merged
+        .addon_sources
+        .iter()
         .find(|s| s.is_default && s.enabled)
         .map(|s| s.url.clone());
     *config = merged.clone();
@@ -4145,7 +4247,9 @@ async fn merge_duplicate_shows(state: State<'_, AppState>) -> Result<ApiResponse
 }
 
 #[tauri::command]
-async fn find_duplicate_media(state: State<'_, AppState>) -> Result<Vec<database::DuplicateGroup>, String> {
+async fn find_duplicate_media(
+    state: State<'_, AppState>,
+) -> Result<Vec<database::DuplicateGroup>, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.find_duplicate_media().map_err(|e| e.to_string())
 }
@@ -4359,6 +4463,40 @@ fn resolve_ffprobe_path(config: &config::Config) -> Option<String> {
         {
             return Some(path);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(ffmpeg_path) = config
+            .ffmpeg_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let sibling = std::path::Path::new(ffmpeg_path).with_file_name("ffprobe");
+            if sibling.exists()
+                && config::validate_executable_path(&sibling.to_string_lossy(), "ffprobe").is_ok()
+            {
+                return Some(sibling.to_string_lossy().to_string());
+            }
+        }
+
+        let output = std::process::Command::new("which")
+            .arg("ffprobe")
+            .output()
+            .ok()?;
+        if output.status.success() {
+            if let Some(path) = String::from_utf8(output.stdout)
+                .ok()
+                .and_then(|paths| paths.lines().map(str::trim).find(|value| !value.is_empty()).map(str::to_string))
+                .filter(|path| std::path::Path::new(path).is_file())
+                .filter(|path| config::validate_executable_path(path, "ffprobe").is_ok())
+            {
+                return Some(path.to_string());
+            }
+        }
+
+        return None;
     }
 
     if let Some(ffmpeg_path) = config
@@ -4732,7 +4870,7 @@ fn detect_tracks_from_running_mpv(pipe_name: &str) -> Result<DetectedMpvTracks, 
     };
 
     // NOTE(from_raw_handle safety): File::from_raw_handle takes ownership of the
-    // Windows handle. The returned File will close the handle on drop. This function
+    // WebviewWindows handle. The returned File will close the handle on drop. This function
     // must NOT be called more than once for the same pipe, because the handle would
     // already be consumed. The `break` after successful acquisition prevents retry
     // within this loop; callers are responsible for ensuring single invocation.
@@ -4822,7 +4960,7 @@ fn detect_tracks_from_running_mpv(pipe_name: &str) -> Result<DetectedMpvTracks, 
 
 #[cfg(not(windows))]
 fn detect_tracks_from_running_mpv(_pipe_name: &str) -> Result<DetectedMpvTracks, String> {
-    Err("MPV IPC track detection is currently supported only on Windows".to_string())
+    Err("MPV IPC track detection is currently supported only on WebviewWindows".to_string())
 }
 
 /// Write auth headers to a temporary file and return its path.
@@ -5242,7 +5380,7 @@ async fn clear_download_history(
     state.download_manager.clear_history();
     // Refresh all jobs for the frontend
     let jobs = state.download_manager.list_jobs();
-    let _ = app_handle.emit_all("download-queue-cleared", jobs);
+    let _ = app_handle.emit("download-queue-cleared", jobs);
     Ok(())
 }
 
@@ -5265,7 +5403,7 @@ async fn open_download_job_target(
             .unwrap_or_else(download_manager::default_downloads_dir)
     };
     open::that_detached(&target).map_err(|error| error.to_string())?;
-    let _ = app_handle.emit_all("download-folder-opened", snapshot);
+    let _ = app_handle.emit("download-folder-opened", snapshot);
     Ok(())
 }
 
@@ -6021,7 +6159,7 @@ async fn zip_analyze(
 #[tauri::command]
 async fn zip_index_episodes(
     state: State<'_, AppState>,
-    window: Window,
+    window: WebviewWindow,
     zip_file_id: String,
     folder_id: String,
 ) -> Result<zip_manager::ZipIndexResult, String> {
@@ -6169,19 +6307,28 @@ async fn clear_progress(state: State<'_, AppState>, media_id: i64) -> Result<Api
 }
 
 #[tauri::command]
-async fn update_episode_duration(state: State<'_, AppState>, media_id: i64, duration_seconds: f64) -> Result<ApiResponse, String> {
+async fn update_episode_duration(
+    state: State<'_, AppState>,
+    media_id: i64,
+    duration_seconds: f64,
+) -> Result<ApiResponse, String> {
     if duration_seconds <= 0.0 {
-        return Ok(ApiResponse { message: "Skipped: invalid duration.".to_string() });
+        return Ok(ApiResponse {
+            message: "Skipped: invalid duration.".to_string(),
+        });
     }
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.update_duration(media_id, duration_seconds).map_err(|e| e.to_string())?;
-    Ok(ApiResponse { message: "Duration updated.".to_string() })
+    db.update_duration(media_id, duration_seconds)
+        .map_err(|e| e.to_string())?;
+    Ok(ApiResponse {
+        message: "Duration updated.".to_string(),
+    })
 }
 
 // Fix match - update metadata from TMDB (or OMDb hybrid)
 #[tauri::command]
 async fn fix_match(
-    window: Window,
+    window: WebviewWindow,
     state: State<'_, AppState>,
     media_id: i64,
     tmdb_id: String,
@@ -6197,7 +6344,10 @@ async fn fix_match(
     let _omdb_credential = get_omdb_credential(&config.omdb_api_key.clone().unwrap_or_default());
     let image_cache_dir = database::get_image_cache_dir();
 
-    println!("[META] fix_match called for media_id={}, tmdb_id={}, imdb_id={:?}", media_id, tmdb_id, imdb_id);
+    println!(
+        "[META] fix_match called for media_id={}, tmdb_id={}, imdb_id={:?}",
+        media_id, tmdb_id, imdb_id
+    );
 
     let mut metadata = if let Some(ref imdb) = imdb_id {
         // IMDb ID provided: resolve via TMDB /find, then fetch full TMDB metadata
@@ -6208,8 +6358,9 @@ async fn fix_match(
         tokio::time::timeout(
             Duration::from_secs(40),
             tokio::task::spawn_blocking(move || -> Result<tmdb::TmdbMetadata, String> {
-                let (tmdb_id_resolved, resolved_type) = find_tmdb_id_by_imdb_id(&api_key_c, &imdb_c)
-                    .ok_or_else(|| format!("No TMDB match found for IMDb ID {}", imdb_c))?;
+                let (tmdb_id_resolved, resolved_type) =
+                    find_tmdb_id_by_imdb_id(&api_key_c, &imdb_c)
+                        .ok_or_else(|| format!("No TMDB match found for IMDb ID {}", imdb_c))?;
 
                 let mut meta = tmdb::fetch_metadata_by_id(
                     &api_key_c,
@@ -6226,7 +6377,6 @@ async fn fix_match(
         .await
         .map_err(|_| "Fix Match timed out while fetching metadata".to_string())?
         .map_err(|e| e.to_string())??
-
     } else {
         // Standard TMDB-only mode
         let api_key_clone = api_key.clone();
@@ -6299,7 +6449,10 @@ async fn fix_match(
         meta
     };
 
-    println!("[TMDB] fix_match metadata: poster={:?}", metadata.poster_path);
+    println!(
+        "[TMDB] fix_match metadata: poster={:?}",
+        metadata.poster_path
+    );
     let updated_title = metadata.title.clone();
     let updated_tmdb_id = metadata.tmdb_id.clone();
 
@@ -6315,13 +6468,28 @@ async fn fix_match(
     // Always try imdbapi.dev for poster — prefer it over TMDB if available
     if let Some(ref imdb_id) = metadata.imdb_id {
         let image_cache_dir = database::get_image_cache_dir();
-        let image_type = if media_type == "tv" { tmdb::ImageType::SeriesBanner } else { tmdb::ImageType::MovieBanner };
+        let image_type = if media_type == "tv" {
+            tmdb::ImageType::SeriesBanner
+        } else {
+            tmdb::ImageType::MovieBanner
+        };
         let imdb_url = format!("https://api.imdbapi.dev/titles/{}", imdb_id);
         if let Ok(resp) = http_client::shared_client().get(&imdb_url).send() {
             if let Ok(json) = resp.json::<serde_json::Value>() {
-                if let Some(img_url) = json.get("primaryImage").and_then(|i| i.get("url")).and_then(|u| u.as_str()) {
-                    if let Some(cached_path) = tmdb::cache_imdb_image(img_url, std::path::Path::new(&image_cache_dir), &image_type) {
-                        println!("[IMDBAPI] fix_match poster override: Ok(\"{}\")", cached_path);
+                if let Some(img_url) = json
+                    .get("primaryImage")
+                    .and_then(|i| i.get("url"))
+                    .and_then(|u| u.as_str())
+                {
+                    if let Some(cached_path) = tmdb::cache_imdb_image(
+                        img_url,
+                        std::path::Path::new(&image_cache_dir),
+                        &image_type,
+                    ) {
+                        println!(
+                            "[IMDBAPI] fix_match poster override: Ok(\"{}\")",
+                            cached_path
+                        );
                         metadata.poster_path = Some(cached_path.clone());
                         if let Ok(db) = state.db.lock() {
                             let _ = db.update_poster_path(media_id, &cached_path);
@@ -6335,7 +6503,6 @@ async fn fix_match(
             }
         }
     }
-
 
     let payload = serde_json::json!({
         "type": "metadata-updated",
@@ -6408,7 +6575,7 @@ fn ensure_zip_proxy_firewall_rule() {
     );
 
     let ps = format!(
-        "Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile','-WindowStyle','Hidden','-EncodedCommand','{}')",
+        "Start-Process -FilePath 'powershell.exe' -Verb RunAs -WebviewWindowStyle Hidden -Wait -ArgumentList @('-NoProfile','-WebviewWindowStyle','Hidden','-EncodedCommand','{}')",
         encoded_script
     );
 
@@ -6438,7 +6605,7 @@ async fn stop_zip_proxy_handle_blocking(
 
 #[tauri::command]
 async fn play_with_mpv(
-    window: Window,
+    window: WebviewWindow,
     state: State<'_, AppState>,
     media_id: i64,
     resume: bool,
@@ -6668,11 +6835,11 @@ async fn play_with_mpv(
                     } else {
                         "extracted "
                     },
-                        media.title,
-                        extracted_path
-                    );
-                    (extracted_path, None, None, None, false)
-                } else {
+                    media.title,
+                    extracted_path
+                );
+                (extracted_path, None, None, None, false)
+            } else {
                 match archive_manager::archive_format_for_media(&media) {
                     archive_manager::ArchiveFormat::Zip => match zip_compression_method
                         .unwrap_or_default()
@@ -6810,8 +6977,7 @@ async fn play_with_mpv(
                 let proxy_url = proxy.localhost_url();
                 println!(
                     "[MPV] Routing cloud playback through GDrive stream proxy at {} for file_id={}",
-                    proxy_url,
-                    cloud_file_id
+                    proxy_url, cloud_file_id
                 );
                 (proxy_url, None, None, Some(proxy), true)
             } else {
@@ -6931,7 +7097,7 @@ async fn play_with_mpv(
             .lock()
             .map_err(|e| e.to_string())?;
         sessions.insert(
-             media_id,
+            media_id,
             ActiveMpvSession {
                 session: MpvSession {
                     media_id,
@@ -6948,10 +7114,11 @@ async fn play_with_mpv(
     // Spawn a background thread to monitor MPV and save progress
     let db_path = database::get_database_path();
     let window_clone = window.clone();
-    let app_handle = window.app_handle();
+    let app_handle = window.app_handle().clone();
 
+    let window_for_tracks = window.clone();
     if let Some(pipe_name) = mpv_audio_probe_pipe {
-        let window_for_tracks = window.clone();
+        let track_window = window_for_tracks.clone();
         std::thread::spawn(move || match detect_tracks_from_running_mpv(&pipe_name) {
             Ok(tracks) => {
                 if !tracks.audio_tracks.is_empty() {
@@ -6961,7 +7128,7 @@ async fn play_with_mpv(
                         season_number,
                         tracks: tracks.audio_tracks,
                     };
-                    let _ = window_for_tracks.emit("mpv-audio-tracks-detected", payload);
+                    let _ = track_window.emit("mpv-audio-tracks-detected", payload);
                 }
 
                 if !tracks.subtitle_tracks.is_empty() {
@@ -6971,7 +7138,7 @@ async fn play_with_mpv(
                         season_number,
                         tracks: tracks.subtitle_tracks,
                     };
-                    let _ = window_for_tracks.emit("mpv-subtitle-tracks-detected", payload);
+                    let _ = track_window.emit("mpv-subtitle-tracks-detected", payload);
                 }
             }
             Err(error) => {
@@ -7159,9 +7326,9 @@ async fn get_mpv_status(
                         .active_mpv_sessions
                         .lock()
                         .map_err(|e| e.to_string())?;
-                    sessions.remove(&media_id).map(|mut s| {
-                        (s.zip_proxy.take(), s.gdrive_stream_proxy.take())
-                    })
+                    sessions
+                        .remove(&media_id)
+                        .map(|mut s| (s.zip_proxy.take(), s.gdrive_stream_proxy.take()))
                 }
                 .unwrap_or((None, None));
                 if let Some(zip) = zip_proxy {
@@ -7337,7 +7504,7 @@ async fn get_cached_image_path(image_name: String) -> Result<String, String> {
     Ok(final_path)
 }
 
-// Read video file chunk (workaround for asset protocol issues with Windows drive letters)
+// Read video file chunk (workaround for asset protocol issues with WebviewWindows drive letters)
 #[tauri::command]
 async fn read_video_chunk(
     state: State<'_, AppState>,
@@ -7423,7 +7590,7 @@ fn build_tmdb_api_url(path: &str, credential: &str, extra_params: &str) -> Strin
 }
 
 // Helper function to perform HTTP GET with retry logic and optional Bearer auth
-// Configured to handle Windows connection issues (error 10054 - connection reset)
+// Configured to handle WebviewWindows connection issues (error 10054 - connection reset)
 fn http_get_with_retry_auth(
     url: &str,
     credential: &str,
@@ -7492,7 +7659,7 @@ fn http_get_with_retry_auth(
 }
 
 // Helper function to perform HTTP GET with retry logic (legacy, no auth header)
-// Configured to handle Windows connection issues (error 10054 - connection reset)
+// Configured to handle WebviewWindows connection issues (error 10054 - connection reset)
 fn http_get_with_retry(url: &str, max_retries: u32) -> Result<reqwest::blocking::Response, String> {
     let mut last_error = String::new();
 
@@ -7598,10 +7765,7 @@ fn fetch_imdb_rating_for_id(credential: &str, imdb_id: &str) -> Option<OmdbEpiso
     Some(rating)
 }
 
-fn find_tmdb_id_by_imdb_id(
-    tmdb_credential: &str,
-    imdb_id: &str,
-) -> Option<(String, String)> {
+fn find_tmdb_id_by_imdb_id(tmdb_credential: &str, imdb_id: &str) -> Option<(String, String)> {
     // Returns (tmdb_id, media_type)
     let url = build_tmdb_api_url(
         &format!("/find/{}", imdb_id),
@@ -7645,7 +7809,12 @@ fn find_tmdb_id_by_imdb_id(
         .movie_results
         .first()
         .map(|r| (r.id.to_string(), "movie".to_string()))
-        .or_else(|| result.tv_results.first().map(|r| (r.id.to_string(), "tv".to_string())))
+        .or_else(|| {
+            result
+                .tv_results
+                .first()
+                .map(|r| (r.id.to_string(), "tv".to_string()))
+        })
 }
 
 // TMDB Search result for frontend
@@ -7847,9 +8016,9 @@ async fn get_movie_details(
 
 #[tauri::command]
 async fn validate_hubdrive_url(url: String) -> Result<serde_json::Value, String> {
-    let result = tokio::task::spawn_blocking(move || {
-        remote_source::validate_hubdrive_url(&url)
-    }).await.map_err(|e| e.to_string())??;
+    let result = tokio::task::spawn_blocking(move || remote_source::validate_hubdrive_url(&url))
+        .await
+        .map_err(|e| e.to_string())??;
     Ok(serde_json::json!({ "isValid": result.0, "title": result.1 }))
 }
 
@@ -7869,14 +8038,18 @@ async fn verify_stream_url(url: String) -> Result<bool, String> {
             }
             Err(_) => Ok(false),
         }
-    }).await.map_err(|e| e.to_string())?;
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     result
 }
 
 /// Verify multiple stream URLs with staggered delays to avoid rate limiting.
 /// Returns a map of url -> isAlive.
 #[tauri::command]
-async fn verify_stream_urls(urls: Vec<String>) -> Result<std::collections::HashMap<String, bool>, String> {
+async fn verify_stream_urls(
+    urls: Vec<String>,
+) -> Result<std::collections::HashMap<String, bool>, String> {
     let mut results = std::collections::HashMap::new();
     for (i, url) in urls.iter().enumerate() {
         // Stagger requests: 150ms between each to avoid rate limiting
@@ -7897,7 +8070,9 @@ async fn verify_stream_urls(urls: Vec<String>) -> Result<std::collections::HashM
                 }
                 Err(_) => Ok(false),
             }
-        }).await.map_err(|e| e.to_string())??;
+        })
+        .await
+        .map_err(|e| e.to_string())??;
         results.insert(url.clone(), alive);
     }
     Ok(results)
@@ -7934,7 +8109,8 @@ fn cinemeta_to_movie_details(t: &cinemeta_api::CinemetaTitle) -> MovieDetails {
 fn balloonerism_to_movie_details(t: &balloonerismm_api::MovieDetail) -> MovieDetails {
     let runtime = t.runtime.filter(|m| *m > 0);
     MovieDetails {
-        id: t.id
+        id: t
+            .id
             .trim_start_matches("tt")
             .chars()
             .take_while(|c| c.is_ascii_digit())
@@ -8052,7 +8228,9 @@ fn cinemeta_to_tv_details(t: &cinemeta_api::CinemetaTitle) -> TvShowDetails {
     let map_to_ep = |e: RawAirEpisodeShape| TvEpisodeInfo {
         season_number: e.season_number,
         episode_number: e.episode_number,
-        name: e.name.unwrap_or_else(|| format!("Episode {}", e.episode_number)),
+        name: e
+            .name
+            .unwrap_or_else(|| format!("Episode {}", e.episode_number)),
         overview: e.overview,
         still_path: e.still_path,
         air_date: e.air_date,
@@ -8101,11 +8279,12 @@ fn balloonerism_to_tv_details(t: &balloonerismm_api::TvDetail) -> TvShowDetails 
         .as_ref()
         .and_then(|arr| arr.first().copied())
         .map(|m| m * 60); // store in seconds (matches MovieDetails.runtime convention used elsewhere)
-    let seasons_count = t.number_of_seasons.unwrap_or_else(|| {
-        t.seasons.as_ref().map(|s| s.len() as i32).unwrap_or(0)
-    });
+    let seasons_count = t
+        .number_of_seasons
+        .unwrap_or_else(|| t.seasons.as_ref().map(|s| s.len() as i32).unwrap_or(0));
     TvShowDetails {
-        id: t.id
+        id: t
+            .id
             .trim_start_matches("tt")
             .chars()
             .take_while(|c| c.is_ascii_digit())
@@ -8174,7 +8353,11 @@ fn default_tv_show_details_for_unused_runtime(_runtime: Option<i32>) -> TvShowDe
 }
 
 #[tauri::command]
-async fn resolve_imdb_id(state: State<'_, AppState>, tmdb_id: i64, media_type: String) -> Result<Option<String>, String> {
+async fn resolve_imdb_id(
+    state: State<'_, AppState>,
+    tmdb_id: i64,
+    media_type: String,
+) -> Result<Option<String>, String> {
     let api_key = {
         let config = state.config.lock().map_err(|e| e.to_string())?;
         config.tmdb_api_key.clone().unwrap_or_default()
@@ -8182,9 +8365,10 @@ async fn resolve_imdb_id(state: State<'_, AppState>, tmdb_id: i64, media_type: S
     if api_key.trim().is_empty() {
         return Ok(None);
     }
-    let result = tokio::task::spawn_blocking(move || {
-        tmdb::fetch_imdb_id(&api_key, tmdb_id, &media_type)
-    }).await.map_err(|e| e.to_string())?;
+    let result =
+        tokio::task::spawn_blocking(move || tmdb::fetch_imdb_id(&api_key, tmdb_id, &media_type))
+            .await
+            .map_err(|e| e.to_string())?;
     Ok(result)
 }
 
@@ -8354,19 +8538,17 @@ async fn get_tv_season_episodes(
                 );
                 let episodes: Vec<TvEpisodeInfo> = cached_episodes
                     .into_iter()
-                    .map(|e| {
-                        TvEpisodeInfo {
-                            season_number: Some(season_number),
-                            episode_number: e.episode_number,
-                            name: e
-                                .episode_title
-                                .unwrap_or_else(|| format!("Episode {}", e.episode_number)),
-                            overview: e.overview,
-                            still_path: e.still_path,
-                            air_date: e.air_date,
-                            runtime: None,
-                            vote_average: e.vote_average,
-                        }
+                    .map(|e| TvEpisodeInfo {
+                        season_number: Some(season_number),
+                        episode_number: e.episode_number,
+                        name: e
+                            .episode_title
+                            .unwrap_or_else(|| format!("Episode {}", e.episode_number)),
+                        overview: e.overview,
+                        still_path: e.still_path,
+                        air_date: e.air_date,
+                        runtime: None,
+                        vote_average: e.vote_average,
                     })
                     .collect();
 
@@ -8498,7 +8680,12 @@ async fn get_tv_season_episodes(
                                 season: raw.season_number,
                                 episode: e.episode_number,
                             };
-                            tmdb::cache_image_organized(tmdb_path, &image_cache_dir, "episode", image_type)
+                            tmdb::cache_image_organized(
+                                tmdb_path,
+                                &image_cache_dir,
+                                "episode",
+                                image_type,
+                            )
                         } else {
                             None
                         }
@@ -8551,7 +8738,10 @@ async fn get_tv_season_episodes(
 
     // Try to get better episode images from imdbapi.dev (also in thread to avoid panic)
     if let Some(ref show_imdb_id) = show_imdb_id_from_db {
-        println!("[IMDBAPI] Fetching episode images for show {} season {}", show_imdb_id, season_number);
+        println!(
+            "[IMDBAPI] Fetching episode images for show {} season {}",
+            show_imdb_id, season_number
+        );
         let show_imdb_id_clone = show_imdb_id.clone();
         let (img_tx, img_rx) = tokio::sync::oneshot::channel();
         std::thread::spawn(move || {
@@ -8567,11 +8757,20 @@ async fn get_tv_season_episodes(
                         for ep in episodes {
                             if let (Some(ep_num), Some(img_url)) = (
                                 ep.get("episodeNumber").and_then(|n| n.as_i64()),
-                                ep.get("primaryImage").and_then(|i| i.get("url")).and_then(|u| u.as_str()),
+                                ep.get("primaryImage")
+                                    .and_then(|i| i.get("url"))
+                                    .and_then(|u| u.as_str()),
                             ) {
                                 let image_cache_dir = database::get_image_cache_dir();
-                                let image_type = tmdb::ImageType::EpisodeBanner { season: season_number, episode: ep_num as i32 };
-                                if let Some(cached) = tmdb::cache_imdb_image(img_url, std::path::Path::new(&image_cache_dir), &image_type) {
+                                let image_type = tmdb::ImageType::EpisodeBanner {
+                                    season: season_number,
+                                    episode: ep_num as i32,
+                                };
+                                if let Some(cached) = tmdb::cache_imdb_image(
+                                    img_url,
+                                    std::path::Path::new(&image_cache_dir),
+                                    &image_type,
+                                ) {
                                     image_count += 1;
                                     results.push((ep_num as i32, cached));
                                 }
@@ -8580,7 +8779,10 @@ async fn get_tv_season_episodes(
                     }
                 }
             }
-            println!("[IMDBAPI] Got {} episode images from imdbapi.dev", image_count);
+            println!(
+                "[IMDBAPI] Got {} episode images from imdbapi.dev",
+                image_count
+            );
             let _ = img_tx.send(results);
         });
         // Apply cached images to result
@@ -8629,7 +8831,8 @@ async fn get_episode_imdb_ratings(
     // ALL blocking HTTP in std::thread::spawn to avoid tokio runtime panic (reqwest 0.12)
     let (ratings_tx, ratings_rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
-        let mut results: std::collections::HashMap<i32, ImdbEpisodeRating> = std::collections::HashMap::new();
+        let mut results: std::collections::HashMap<i32, ImdbEpisodeRating> =
+            std::collections::HashMap::new();
         let mut missing_from_imdbapi: Vec<i32> = Vec::new();
 
         // Resolve show IMDb ID from TMDB if not provided
@@ -8642,20 +8845,24 @@ async fn get_episode_imdb_ratings(
                     "",
                 );
                 #[derive(serde::Deserialize)]
-                struct ShowExternalIds { imdb_id: Option<String> }
+                struct ShowExternalIds {
+                    imdb_id: Option<String>,
+                }
                 let client = http_client::shared_client();
                 let use_bearer = crate::is_access_token(&tmdb_credential);
                 let req = if use_bearer {
-                    client.get(&ext_url).header("Authorization", format!("Bearer {}", &tmdb_credential))
+                    client
+                        .get(&ext_url)
+                        .header("Authorization", format!("Bearer {}", &tmdb_credential))
                 } else {
                     client.get(&ext_url)
                 };
                 match req.send() {
-                    Ok(resp) if resp.status().is_success() => {
-                        resp.json::<ShowExternalIds>().ok()
-                            .and_then(|ids| ids.imdb_id)
-                            .filter(|id| !id.trim().is_empty())
-                    }
+                    Ok(resp) if resp.status().is_success() => resp
+                        .json::<ShowExternalIds>()
+                        .ok()
+                        .and_then(|ids| ids.imdb_id)
+                        .filter(|id| !id.trim().is_empty()),
                     _ => None,
                 }
             }
@@ -8663,10 +8870,19 @@ async fn get_episode_imdb_ratings(
 
         // Step 1: Try imdbapi.dev batch fetch if we have the show's IMDb ID
         if let Some(ref show_id) = show_imdb_id {
-            println!("[IMDBAPI] Fetching episode ratings for show {} season {}", show_id, season_number);
-            let url = format!("https://api.imdbapi.dev/titles/{}/episodes?season={}", show_id, season_number);
+            println!(
+                "[IMDBAPI] Fetching episode ratings for show {} season {}",
+                show_id, season_number
+            );
+            let url = format!(
+                "https://api.imdbapi.dev/titles/{}/episodes?season={}",
+                show_id, season_number
+            );
             let client = http_client::shared_client();
-            let resp = client.get(&url).timeout(std::time::Duration::from_secs(10)).send();
+            let resp = client
+                .get(&url)
+                .timeout(std::time::Duration::from_secs(10))
+                .send();
 
             #[derive(serde::Deserialize)]
             struct ImdbApiEpisode {
@@ -8712,7 +8928,8 @@ async fn get_episode_imdb_ratings(
                         episodes: Vec<ImdbApiEpisode>,
                     }
                     if let Ok(data) = r.json::<EpisodesResponse>() {
-                        let episode_set: std::collections::HashSet<i32> = episode_numbers.iter().copied().collect();
+                        let episode_set: std::collections::HashSet<i32> =
+                            episode_numbers.iter().copied().collect();
                         for ep in data.episodes {
                             let ep_num = match ep.episodeNumber {
                                 Some(n) if episode_set.contains(&n) => n,
@@ -8720,19 +8937,25 @@ async fn get_episode_imdb_ratings(
                             };
                             if let (Some(imdb_id), Some(rating)) = (ep.id, ep.rating) {
                                 if rating.aggregateRating.is_some() {
-                                    results.insert(ep_num, ImdbEpisodeRating {
-                                        imdb_id,
-                                        imdb_rating: rating.aggregateRating,
-                                        imdb_votes: rating.voteCount,
-                                        still_url: ep.primaryImage.and_then(|img| img.url),
-                                        title: ep.title.clone(),
-                                        plot: ep.plot.clone(),
-                                    });
+                                    results.insert(
+                                        ep_num,
+                                        ImdbEpisodeRating {
+                                            imdb_id,
+                                            imdb_rating: rating.aggregateRating,
+                                            imdb_votes: rating.voteCount,
+                                            still_url: ep.primaryImage.and_then(|img| img.url),
+                                            title: ep.title.clone(),
+                                            plot: ep.plot.clone(),
+                                        },
+                                    );
                                 }
                             }
                         }
                     }
-                    println!("[IMDBAPI] Got {} episode ratings from imdbapi.dev", results.len());
+                    println!(
+                        "[IMDBAPI] Got {} episode ratings from imdbapi.dev",
+                        results.len()
+                    );
                 }
                 _ => {}
             }
@@ -8750,7 +8973,10 @@ async fn get_episode_imdb_ratings(
         // Step 2: For missing episodes, resolve IMDb ID via TMDB and try OMDb
         for ep_num in &missing_from_imdbapi {
             let ext_url = build_tmdb_api_url(
-                &format!("/tv/{}/season/{}/episode/{}/external_ids", tv_id, season_number, ep_num),
+                &format!(
+                    "/tv/{}/season/{}/episode/{}/external_ids",
+                    tv_id, season_number, ep_num
+                ),
                 &tmdb_credential,
                 "",
             );
@@ -8765,16 +8991,18 @@ async fn get_episode_imdb_ratings(
                 let client = http_client::shared_client();
                 let use_bearer = crate::is_access_token(&tmdb_credential);
                 let req = if use_bearer {
-                    client.get(&ext_url).header("Authorization", format!("Bearer {}", &tmdb_credential))
+                    client
+                        .get(&ext_url)
+                        .header("Authorization", format!("Bearer {}", &tmdb_credential))
                 } else {
                     client.get(&ext_url)
                 };
                 match req.send() {
-                    Ok(resp) if resp.status().is_success() => {
-                        resp.json::<EpisodeExternalIds>().ok()
-                            .and_then(|ids| ids.imdb_id)
-                            .filter(|id| !id.trim().is_empty())
-                    }
+                    Ok(resp) if resp.status().is_success() => resp
+                        .json::<EpisodeExternalIds>()
+                        .ok()
+                        .and_then(|ids| ids.imdb_id)
+                        .filter(|id| !id.trim().is_empty()),
                     _ => None,
                 }
             };
@@ -8782,25 +9010,31 @@ async fn get_episode_imdb_ratings(
             let Some(imdb_id) = imdb_id else { continue };
 
             // Try OMDb
-            println!("[OMDB] Fallback: fetching rating for episode {} via OMDb (imdb_id: {})", ep_num, imdb_id);
+            println!(
+                "[OMDB] Fallback: fetching rating for episode {} via OMDb (imdb_id: {})",
+                ep_num, imdb_id
+            );
             let rating = fetch_imdb_rating_for_id(&omdb_credential, &imdb_id);
-            let parsed_rating = rating.as_ref().and_then(|r| {
-                r.imdbRating.as_deref().and_then(|v| v.parse::<f64>().ok())
-            });
+            let parsed_rating = rating
+                .as_ref()
+                .and_then(|r| r.imdbRating.as_deref().and_then(|v| v.parse::<f64>().ok()));
             let parsed_votes = rating.as_ref().and_then(|r| {
-                r.imdbVotes.as_deref().and_then(|v| {
-                    v.replace(',', "").parse::<i64>().ok()
-                })
+                r.imdbVotes
+                    .as_deref()
+                    .and_then(|v| v.replace(',', "").parse::<i64>().ok())
             });
 
-            results.insert(*ep_num, ImdbEpisodeRating {
-                imdb_id,
-                imdb_rating: parsed_rating,
-                imdb_votes: parsed_votes,
-                still_url: None,
-                title: None,
-                plot: None,
-            });
+            results.insert(
+                *ep_num,
+                ImdbEpisodeRating {
+                    imdb_id,
+                    imdb_rating: parsed_rating,
+                    imdb_votes: parsed_votes,
+                    still_url: None,
+                    title: None,
+                    plot: None,
+                },
+            );
         }
 
         let _ = ratings_tx.send(results);
@@ -8876,12 +9110,16 @@ async fn get_imdb_details(
             let ext_url = build_tmdb_api_url(&ext_path, &tmdb_credential, "");
 
             #[derive(serde::Deserialize)]
-            struct ExternalIds { imdb_id: Option<String> }
+            struct ExternalIds {
+                imdb_id: Option<String>,
+            }
 
             let client = http_client::shared_client();
             let use_bearer = crate::is_access_token(&tmdb_credential);
             let req = if use_bearer {
-                client.get(&ext_url).header("Authorization", format!("Bearer {}", &tmdb_credential))
+                client
+                    .get(&ext_url)
+                    .header("Authorization", format!("Bearer {}", &tmdb_credential))
             } else {
                 client.get(&ext_url)
             };
@@ -8890,7 +9128,9 @@ async fn get_imdb_details(
                 return Err(format!("TMDB external_ids error: {}", resp.status()));
             }
             let ids: ExternalIds = resp.json().map_err(|e| e.to_string())?;
-            let resolved = ids.imdb_id.ok_or_else(|| "No IMDb ID found for this TMDB entry".to_string())?;
+            let resolved = ids
+                .imdb_id
+                .ok_or_else(|| "No IMDb ID found for this TMDB entry".to_string())?;
             println!("[TMDB] Resolved imdb_id {} from tmdb_id {}", resolved, tid);
             resolved
         } else {
@@ -8912,7 +9152,11 @@ async fn get_imdb_details(
         println!("[IMDBAPI] Fetching titles for {}", resolved_imdb_id);
         let title_url = format!("https://api.imdbapi.dev/titles/{}", resolved_imdb_id);
         let client = http_client::shared_client();
-        if let Ok(resp) = client.get(&title_url).timeout(std::time::Duration::from_secs(10)).send() {
+        if let Ok(resp) = client
+            .get(&title_url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+        {
             if resp.status().is_success() {
                 #[derive(serde::Deserialize)]
                 struct PrimaryImage {
@@ -8939,15 +9183,28 @@ async fn get_imdb_details(
                     stars: Option<Vec<PersonName>>,
                 }
                 #[derive(serde::Deserialize)]
-                struct TitleRating { aggregateRating: Option<f64>, voteCount: Option<i64> }
+                struct TitleRating {
+                    aggregateRating: Option<f64>,
+                    voteCount: Option<i64>,
+                }
                 #[derive(serde::Deserialize)]
-                struct MetacriticInfo { url: Option<String>, score: Option<i32>, reviewCount: Option<i32> }
+                struct MetacriticInfo {
+                    url: Option<String>,
+                    score: Option<i32>,
+                    reviewCount: Option<i32>,
+                }
                 #[derive(serde::Deserialize)]
-                struct PersonName { displayName: Option<String> }
+                struct PersonName {
+                    displayName: Option<String>,
+                }
                 #[derive(serde::Deserialize)]
-                struct CountryItem { name: Option<String> }
+                struct CountryItem {
+                    name: Option<String>,
+                }
                 #[derive(serde::Deserialize)]
-                struct InterestItem { name: Option<String> }
+                struct InterestItem {
+                    name: Option<String>,
+                }
 
                 if let Ok(title) = resp.json::<TitleResponse>() {
                     details.title = title.primaryTitle;
@@ -8955,12 +9212,22 @@ async fn get_imdb_details(
                     details.end_year = title.endYear;
                     details.runtime_seconds = title.runtimeSeconds;
                     details.genres = title.genres;
-                    details.interests = title.interests.map(|v| v.into_iter().filter_map(|i| i.name).collect());
+                    details.interests = title
+                        .interests
+                        .map(|v| v.into_iter().filter_map(|i| i.name).collect());
                     details.plot = title.plot;
-                    details.origin_countries = title.originCountries.map(|v| v.into_iter().filter_map(|c| c.name).collect());
-                    details.directors = title.directors.map(|v| v.into_iter().filter_map(|p| p.displayName).collect());
-                    details.writers = title.writers.map(|v| v.into_iter().filter_map(|p| p.displayName).collect());
-                    details.stars = title.stars.map(|v| v.into_iter().filter_map(|p| p.displayName).collect());
+                    details.origin_countries = title
+                        .originCountries
+                        .map(|v| v.into_iter().filter_map(|c| c.name).collect());
+                    details.directors = title
+                        .directors
+                        .map(|v| v.into_iter().filter_map(|p| p.displayName).collect());
+                    details.writers = title
+                        .writers
+                        .map(|v| v.into_iter().filter_map(|p| p.displayName).collect());
+                    details.stars = title
+                        .stars
+                        .map(|v| v.into_iter().filter_map(|p| p.displayName).collect());
                     if let Some(r) = title.rating {
                         details.aggregate_rating = r.aggregateRating;
                         details.vote_count = r.voteCount;
@@ -8978,20 +9245,37 @@ async fn get_imdb_details(
 
         // 2. Certificates (MPAA rating)
         println!("[IMDBAPI] Fetching certificates for {}", resolved_imdb_id);
-        let certs_url = format!("https://api.imdbapi.dev/titles/{}/certificates", resolved_imdb_id);
-        if let Ok(resp) = client.get(&certs_url).timeout(std::time::Duration::from_secs(10)).send() {
+        let certs_url = format!(
+            "https://api.imdbapi.dev/titles/{}/certificates",
+            resolved_imdb_id
+        );
+        if let Ok(resp) = client
+            .get(&certs_url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+        {
             if resp.status().is_success() {
                 #[derive(serde::Deserialize)]
-                struct CertificatesResponse { certificates: Option<Vec<CertificateEntry>> }
+                struct CertificatesResponse {
+                    certificates: Option<Vec<CertificateEntry>>,
+                }
                 #[derive(serde::Deserialize)]
-                struct CertificateEntry { country: Option<CountryCode>, rating: Option<String> }
+                struct CertificateEntry {
+                    country: Option<CountryCode>,
+                    rating: Option<String>,
+                }
                 #[derive(serde::Deserialize)]
-                struct CountryCode { code: Option<String> }
+                struct CountryCode {
+                    code: Option<String>,
+                }
 
                 if let Ok(data) = resp.json::<CertificatesResponse>() {
                     if let Some(cert_list) = data.certificates {
-                        details.mpaa_rating = cert_list.iter()
-                            .find(|c| c.country.as_ref().and_then(|co| co.code.as_deref()) == Some("US"))
+                        details.mpaa_rating = cert_list
+                            .iter()
+                            .find(|c| {
+                                c.country.as_ref().and_then(|co| co.code.as_deref()) == Some("US")
+                            })
                             .and_then(|c| c.rating.clone())
                             .or_else(|| cert_list.first().and_then(|c| c.rating.clone()));
                     }
@@ -9002,8 +9286,15 @@ async fn get_imdb_details(
 
         // 3. Box office
         println!("[IMDBAPI] Fetching boxOffice for {}", resolved_imdb_id);
-        let box_url = format!("https://api.imdbapi.dev/titles/{}/boxOffice", resolved_imdb_id);
-        if let Ok(resp) = client.get(&box_url).timeout(std::time::Duration::from_secs(10)).send() {
+        let box_url = format!(
+            "https://api.imdbapi.dev/titles/{}/boxOffice",
+            resolved_imdb_id
+        );
+        if let Ok(resp) = client
+            .get(&box_url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+        {
             if resp.status().is_success() {
                 #[derive(serde::Deserialize)]
                 struct BoxOfficeResponse {
@@ -9017,9 +9308,13 @@ async fn get_imdb_details(
                         m.as_ref().and_then(|a| {
                             a.amount.map(|amt| {
                                 let currency = a.currency.as_deref().unwrap_or("USD");
-                                if amt >= 1_000_000_000.0 { format!("{} {:.1}B", currency, amt / 1_000_000_000.0) }
-                                else if amt >= 1_000_000.0 { format!("{} {:.1}M", currency, amt / 1_000_000.0) }
-                                else { format!("{} {:.0}", currency, amt) }
+                                if amt >= 1_000_000_000.0 {
+                                    format!("{} {:.1}B", currency, amt / 1_000_000_000.0)
+                                } else if amt >= 1_000_000.0 {
+                                    format!("{} {:.1}M", currency, amt / 1_000_000.0)
+                                } else {
+                                    format!("{} {:.0}", currency, amt)
+                                }
                             })
                         })
                     };
@@ -9033,9 +9328,19 @@ async fn get_imdb_details(
         }
 
         // 4. Awards
-        println!("[IMDBAPI] Fetching awardNominations for {}", resolved_imdb_id);
-        let awards_url = format!("https://api.imdbapi.dev/titles/{}/awardNominations", resolved_imdb_id);
-        if let Ok(resp) = client.get(&awards_url).timeout(std::time::Duration::from_secs(10)).send() {
+        println!(
+            "[IMDBAPI] Fetching awardNominations for {}",
+            resolved_imdb_id
+        );
+        let awards_url = format!(
+            "https://api.imdbapi.dev/titles/{}/awardNominations",
+            resolved_imdb_id
+        );
+        if let Ok(resp) = client
+            .get(&awards_url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+        {
             if resp.status().is_success() {
                 #[derive(serde::Deserialize)]
                 struct AwardsResponse {
@@ -9043,9 +9348,17 @@ async fn get_imdb_details(
                     nominations: Option<Vec<AwardNomination>>,
                 }
                 #[derive(serde::Deserialize)]
-                struct AwardStats { nominationCount: Option<i32>, winCount: Option<i32> }
+                struct AwardStats {
+                    nominationCount: Option<i32>,
+                    winCount: Option<i32>,
+                }
                 #[derive(serde::Deserialize)]
-                struct AwardNomination { event: Option<String>, year: Option<i32>, category: Option<String>, isWinner: Option<bool> }
+                struct AwardNomination {
+                    event: Option<String>,
+                    year: Option<i32>,
+                    category: Option<String>,
+                    isWinner: Option<bool>,
+                }
 
                 if let Ok(data) = resp.json::<AwardsResponse>() {
                     if let Some(stats) = data.stats {
@@ -9053,7 +9366,8 @@ async fn get_imdb_details(
                         details.total_wins = stats.winCount;
                     }
                     if let Some(noms) = data.nominations {
-                        let award_list: Vec<ImdbAward> = noms.into_iter()
+                        let award_list: Vec<ImdbAward> = noms
+                            .into_iter()
                             .filter(|n| n.isWinner == Some(true))
                             .take(20)
                             .map(|n| ImdbAward {
@@ -9067,13 +9381,18 @@ async fn get_imdb_details(
                             details.awards = Some(award_list);
                         }
                     }
-                    println!("[IMDBAPI] Got awardNominations data for {}", resolved_imdb_id);
+                    println!(
+                        "[IMDBAPI] Got awardNominations data for {}",
+                        resolved_imdb_id
+                    );
                 }
             }
         }
 
         Ok(details)
-    }).await.map_err(|e| e.to_string())?;
+    })
+    .await
+    .map_err(|e| e.to_string())?;
 
     details
 }
@@ -9096,7 +9415,11 @@ async fn get_parents_guide(imdb_id: String) -> Result<Vec<ParentsGuideCategory>,
         let url = format!("https://api.imdbapi.dev/titles/{}/parentsGuide", imdb_id);
         println!("[IMDBAPI] Fetching parentsGuide for {}", imdb_id);
         let client = http_client::shared_client();
-        let resp = client.get(&url).timeout(std::time::Duration::from_secs(10)).send().map_err(|e| e.to_string())?;
+        let resp = client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(format!("parentsGuide API error: {}", resp.status()));
         }
@@ -9117,21 +9440,28 @@ async fn get_parents_guide(imdb_id: String) -> Result<Vec<ParentsGuideCategory>,
         }
 
         let data: ApiParentsGuideResponse = resp.json().map_err(|e| e.to_string())?;
-        let categories = data.parentsGuide.unwrap_or_default().into_iter().map(|cat| {
-            ParentsGuideCategory {
+        let categories = data
+            .parentsGuide
+            .unwrap_or_default()
+            .into_iter()
+            .map(|cat| ParentsGuideCategory {
                 category: cat.category.unwrap_or_default(),
-                severity_breakdowns: cat.severityBreakdowns.map(|v| v.into_iter().map(|s| {
-                    SeverityBreakdown {
-                        severity_level: s.severityLevel.unwrap_or_default(),
-                        vote_count: s.voteCount.unwrap_or(0),
-                    }
-                }).collect()),
-            }
-        }).collect();
+                severity_breakdowns: cat.severityBreakdowns.map(|v| {
+                    v.into_iter()
+                        .map(|s| SeverityBreakdown {
+                            severity_level: s.severityLevel.unwrap_or_default(),
+                            vote_count: s.voteCount.unwrap_or(0),
+                        })
+                        .collect()
+                }),
+            })
+            .collect();
 
         println!("[IMDBAPI] Got parentsGuide data for {}", imdb_id);
         Ok(categories)
-    }).await.map_err(|e| e.to_string())?;
+    })
+    .await
+    .map_err(|e| e.to_string())?;
 
     result
 }
@@ -9171,13 +9501,17 @@ async fn get_tmdb_reviews(
         let client = http_client::shared_client();
         let use_bearer = crate::is_access_token(&credential);
         let req = if use_bearer {
-            client.get(&url).header("Authorization", format!("Bearer {}", &credential))
+            client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", &credential))
         } else {
             client.get(&url)
         };
 
         #[derive(serde::Deserialize)]
-        struct ReviewsResponse { results: Option<Vec<ReviewEntry>> }
+        struct ReviewsResponse {
+            results: Option<Vec<ReviewEntry>>,
+        }
         #[derive(serde::Deserialize)]
         struct ReviewEntry {
             author: Option<String>,
@@ -9187,15 +9521,21 @@ async fn get_tmdb_reviews(
             author_details: Option<AuthorDetails>,
         }
         #[derive(serde::Deserialize)]
-        struct AuthorDetails { rating: Option<f64> }
+        struct AuthorDetails {
+            rating: Option<f64>,
+        }
 
         match req.send() {
             Ok(resp) if resp.status().is_success() => {
                 if let Ok(data) = resp.json::<ReviewsResponse>() {
-                    data.results.unwrap_or_default().into_iter()
+                    data.results
+                        .unwrap_or_default()
+                        .into_iter()
                         .filter_map(|r| {
                             let content = r.content?;
-                            if content.trim().is_empty() { return None }
+                            if content.trim().is_empty() {
+                                return None;
+                            }
                             Some(TmdbReview {
                                 author: r.author.unwrap_or_else(|| "Anonymous".to_string()),
                                 content,
@@ -9212,7 +9552,9 @@ async fn get_tmdb_reviews(
             }
             _ => Vec::new(),
         }
-    }).await.map_err(|e| e.to_string())?;
+    })
+    .await
+    .map_err(|e| e.to_string())?;
 
     Ok(reviews)
 }
@@ -9310,7 +9652,10 @@ async fn refresh_series_metadata(
         );
         let _ = ep_tx.send(result);
     });
-    let fetched_episodes = ep_rx.await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    let fetched_episodes = ep_rx
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
 
     let mut total_images = 0;
 
@@ -9373,12 +9718,18 @@ async fn refresh_series_metadata(
         std::thread::spawn(move || {
             let show_imdb_id = tmdb_imdb_id_for_show(tv_id, &credential_for_imdb);
             let Some(show_imdb_id) = show_imdb_id else {
-                println!("[REFRESH] No IMDb ID found for TMDB ID {}, skipping imdbapi.dev images", tv_id);
+                println!(
+                    "[REFRESH] No IMDb ID found for TMDB ID {}, skipping imdbapi.dev images",
+                    tv_id
+                );
                 let _ = imdb_tx.send(Ok(Vec::new()));
                 return;
             };
 
-            println!("[IMDBAPI] Refreshing episode images for show {}", show_imdb_id);
+            println!(
+                "[IMDBAPI] Refreshing episode images for show {}",
+                show_imdb_id
+            );
 
             let mut seasons: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
             for (_, s, _) in &owned_for_imdb {
@@ -9393,14 +9744,25 @@ async fn refresh_series_metadata(
                     show_imdb_id, season_num
                 );
                 let client = http_client::shared_client();
-                let resp = match client.get(&imdb_url).timeout(std::time::Duration::from_secs(10)).send() {
+                let resp = match client
+                    .get(&imdb_url)
+                    .timeout(std::time::Duration::from_secs(10))
+                    .send()
+                {
                     Ok(r) if r.status().is_success() => r,
                     Ok(r) => {
-                        println!("[REFRESH] imdbapi.dev returned status {} for season {}", r.status(), season_num);
+                        println!(
+                            "[REFRESH] imdbapi.dev returned status {} for season {}",
+                            r.status(),
+                            season_num
+                        );
                         continue;
                     }
                     Err(e) => {
-                        println!("[REFRESH] imdbapi.dev request failed for season {}: {}", season_num, e);
+                        println!(
+                            "[REFRESH] imdbapi.dev request failed for season {}: {}",
+                            season_num, e
+                        );
                         continue;
                     }
                 };
@@ -9423,12 +9785,18 @@ async fn refresh_series_metadata(
                         Some(n) => n,
                         None => continue,
                     };
-                    let img_url = match ep.get("primaryImage").and_then(|i| i.get("url")).and_then(|u| u.as_str()) {
+                    let img_url = match ep
+                        .get("primaryImage")
+                        .and_then(|i| i.get("url"))
+                        .and_then(|u| u.as_str())
+                    {
                         Some(url) => url,
                         None => continue,
                     };
 
-                    let is_owned = owned_for_imdb.iter().any(|(_, s, e)| *s == *season_num && *e == ep_num as i32);
+                    let is_owned = owned_for_imdb
+                        .iter()
+                        .any(|(_, s, e)| *s == *season_num && *e == ep_num as i32);
                     if !is_owned {
                         continue;
                     }
@@ -9437,7 +9805,11 @@ async fn refresh_series_metadata(
                         season: *season_num,
                         episode: ep_num as i32,
                     };
-                    if let Some(cached_path) = tmdb::cache_imdb_image(img_url, std::path::Path::new(&image_cache_dir_for_imdb), &image_type) {
+                    if let Some(cached_path) = tmdb::cache_imdb_image(
+                        img_url,
+                        std::path::Path::new(&image_cache_dir_for_imdb),
+                        &image_type,
+                    ) {
                         results.push((*season_num, ep_num as i32, cached_path));
                     }
                 }
@@ -9445,7 +9817,8 @@ async fn refresh_series_metadata(
 
             let _ = imdb_tx.send(Ok(results));
         });
-        let imdb_results: Result<Vec<(i32, i32, String)>, String> = imdb_rx.await.map_err(|e| e.to_string())?;
+        let imdb_results: Result<Vec<(i32, i32, String)>, String> =
+            imdb_rx.await.map_err(|e| e.to_string())?;
 
         match imdb_results {
             Ok(results) if !results.is_empty() => {
@@ -9458,7 +9831,10 @@ async fn refresh_series_metadata(
                     );
                 }
                 total_images += results.len();
-                println!("[IMDBAPI] Updated {} episode still paths from imdbapi.dev", results.len());
+                println!(
+                    "[IMDBAPI] Updated {} episode still paths from imdbapi.dev",
+                    results.len()
+                );
             }
             Ok(_) => {
                 println!("[REFRESH] imdbapi.dev: no additional images found");
@@ -9479,7 +9855,12 @@ async fn refresh_series_metadata(
         let mut poster: Option<String> = None;
 
         // Step A: TMDB poster
-        let tmdb_result = tmdb::fetch_metadata_by_id(&credential_for_poster, &tv_id.to_string(), "tv", &image_cache_dir_for_poster);
+        let tmdb_result = tmdb::fetch_metadata_by_id(
+            &credential_for_poster,
+            &tv_id.to_string(),
+            "tv",
+            &image_cache_dir_for_poster,
+        );
         if let Ok(ref tmdb_meta) = tmdb_result {
             if tmdb_meta.poster_path.is_some() {
                 poster = tmdb_meta.poster_path.clone();
@@ -9490,9 +9871,17 @@ async fn refresh_series_metadata(
                 let imdb_url = format!("https://api.imdbapi.dev/titles/{}", show_imdb_id);
                 if let Ok(resp) = http_client::shared_client().get(&imdb_url).send() {
                     if let Ok(json) = resp.json::<serde_json::Value>() {
-                        if let Some(img_url) = json.get("primaryImage").and_then(|i| i.get("url")).and_then(|u| u.as_str()) {
+                        if let Some(img_url) = json
+                            .get("primaryImage")
+                            .and_then(|i| i.get("url"))
+                            .and_then(|u| u.as_str())
+                        {
                             let img_cache = database::get_image_cache_dir();
-                            if let Some(cached) = tmdb::cache_imdb_image(img_url, std::path::Path::new(&img_cache), &tmdb::ImageType::SeriesBanner) {
+                            if let Some(cached) = tmdb::cache_imdb_image(
+                                img_url,
+                                std::path::Path::new(&img_cache),
+                                &tmdb::ImageType::SeriesBanner,
+                            ) {
                                 poster = Some(cached);
                                 println!("[REFRESH] imdbapi.dev poster override: {:?}", poster);
                             }
@@ -9521,7 +9910,11 @@ async fn refresh_series_metadata(
         fetched_episodes.len(),
         total_images
     );
-    println!("[REFRESH] Completed: {} (poster_updated={})", result, new_poster_path.is_some());
+    println!(
+        "[REFRESH] Completed: {} (poster_updated={})",
+        result,
+        new_poster_path.is_some()
+    );
     Ok(result)
 }
 
@@ -10251,7 +10644,8 @@ async fn get_tmdb_release_schedule(
             if let Some(tt) = imdb_id.as_deref() {
                 if let Ok(meta) = cinemeta_api::get_title(kind, tt) {
                     let release_date = meta.released.clone().filter(|s| !s.trim().is_empty());
-                    let suggested = suggested_reminder_at_from_release_date(release_date.as_deref());
+                    let suggested =
+                        suggested_reminder_at_from_release_date(release_date.as_deref());
                     let title = meta.name.clone();
                     let mut schedule = TmdbReleaseSchedule {
                         tmdb_id,
@@ -10698,7 +11092,9 @@ async fn search_tmdb(
 
     let source = match tmdb::pick_source(&credential) {
         tmdb::MetadataSource::Tmdb => "TMDB (themoviedb.org)",
-        tmdb::MetadataSource::Cinemeta => "Cinemeta (v3-cinemeta.strem.io) → Balloonerismm (balloonerismm.workers.dev)",
+        tmdb::MetadataSource::Cinemeta => {
+            "Cinemeta (v3-cinemeta.strem.io) → Balloonerismm (balloonerismm.workers.dev)"
+        }
     };
     println!("[SEARCH_META] Source: {}", source);
 
@@ -10775,46 +11171,50 @@ async fn search_content(
     let q = query.clone();
     let mt = media_type.clone();
 
-    let results = tokio::task::spawn_blocking(move || -> Result<Vec<HybridSearchResult>, String> {
-        let search_type = mt.as_deref();
-        let tmdb_results =
-            tmdb::search_multi_raw_with_fallback(&tmdb_c, &q, search_type)
+    let results =
+        tokio::task::spawn_blocking(move || -> Result<Vec<HybridSearchResult>, String> {
+            let search_type = mt.as_deref();
+            let tmdb_results = tmdb::search_multi_raw_with_fallback(&tmdb_c, &q, search_type)
                 .map_err(|e| e.to_string())?;
 
-        Ok(tmdb_results
-            .into_iter()
-            .filter(|item| mt.as_ref().map_or(true, |want| item.media_type == *want))
-            .map(|item| HybridSearchResult {
-                title: item.title.unwrap_or_else(|| item.name.unwrap_or_default()),
-                year: item
-                    .release_date
-                    .as_deref()
-                    .or(item.first_air_date.as_deref())
-                    .and_then(|d| d.get(..4))
-                    .map(|y| y.to_string()),
-                imdb_id: item.imdb_id.clone().unwrap_or_default(),
-                media_type: item.media_type,
-                plot: item.overview,
-                poster_url: item.poster_path.as_ref().map(|p| {
-                    if p.starts_with("http") {
-                        p.clone()
+            Ok(tmdb_results
+                .into_iter()
+                .filter(|item| mt.as_ref().map_or(true, |want| item.media_type == *want))
+                .map(|item| HybridSearchResult {
+                    title: item.title.unwrap_or_else(|| item.name.unwrap_or_default()),
+                    year: item
+                        .release_date
+                        .as_deref()
+                        .or(item.first_air_date.as_deref())
+                        .and_then(|d| d.get(..4))
+                        .map(|y| y.to_string()),
+                    imdb_id: item.imdb_id.clone().unwrap_or_default(),
+                    media_type: item.media_type,
+                    plot: item.overview,
+                    poster_url: item.poster_path.as_ref().map(|p| {
+                        if p.starts_with("http") {
+                            p.clone()
+                        } else {
+                            format!("https://image.tmdb.org/t/p/w500{}", p)
+                        }
+                    }),
+                    genre: None,
+                    director: None,
+                    actors: None,
+                    imdb_rating: item.vote_average,
+                    tmdb_id: if item.imdb_id.is_some() {
+                        None
                     } else {
-                        format!("https://image.tmdb.org/t/p/w500{}", p)
-                    }
-                }),
-                genre: None,
-                director: None,
-                actors: None,
-                imdb_rating: item.vote_average,
-                tmdb_id: if item.imdb_id.is_some() { None } else { Some(item.id) },
-                tmdb_poster_path: item.poster_path.clone(),
-                tmdb_backdrop_path: item.backdrop_path.clone(),
-                tmdb_vote_average: item.vote_average,
-            })
-            .collect())
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+                        Some(item.id)
+                    },
+                    tmdb_poster_path: item.poster_path.clone(),
+                    tmdb_backdrop_path: item.backdrop_path.clone(),
+                    tmdb_vote_average: item.vote_average,
+                })
+                .collect())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
 
     Ok(HybridSearchResponse { results })
 }
@@ -11347,8 +11747,8 @@ async fn clear_cloud_cache(state: State<'_, AppState>) -> Result<ApiResponse, St
 
 /// Helper function to create the main window
 /// Used when showing the app from tray - creates a new window if none exists
-fn create_main_window(app: &AppHandle) -> Result<tauri::Window, tauri::Error> {
-    let window = WindowBuilder::new(app, "main", WindowUrl::App("index.html".into()))
+fn create_main_window(app: &AppHandle) -> Result<WebviewWindow, tauri::Error> {
+    let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title(runtime_window_title())
         .inner_size(1200.0, 800.0)
         .resizable(true)
@@ -11361,7 +11761,7 @@ fn create_main_window(app: &AppHandle) -> Result<tauri::Window, tauri::Error> {
 }
 
 fn restore_or_create_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_window("main") {
+    if let Some(window) = app.get_webview_window("main") {
         window.unminimize().ok();
         window.show().ok();
         window.set_focus().ok();
@@ -11411,8 +11811,8 @@ fn runtime_deep_link_scheme() -> &'static str {
 }
 
 #[cfg(target_os = "windows")]
-fn apply_window_corner_radius(window: &tauri::Window) {
-    use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
+fn apply_window_corner_radius(window: &WebviewWindow) {
+    use windows_sys::Win32::Graphics::Dwm::DwmSetWebviewWindowAttribute;
 
     const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
     const DWMWCP_ROUND: u32 = 2;
@@ -11420,7 +11820,7 @@ fn apply_window_corner_radius(window: &tauri::Window) {
     if let Ok(hwnd) = window.hwnd() {
         let preference = DWMWCP_ROUND;
         unsafe {
-            let _ = DwmSetWindowAttribute(
+            let _ = DwmSetWebviewWindowAttribute(
                 hwnd.0 as _,
                 DWMWA_WINDOW_CORNER_PREFERENCE,
                 &preference as *const _ as *const std::ffi::c_void,
@@ -11431,22 +11831,12 @@ fn apply_window_corner_radius(window: &tauri::Window) {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn apply_window_corner_radius(_window: &tauri::Window) {}
+fn apply_window_corner_radius(_window: &WebviewWindow) {}
 
 fn send_system_notification(app_handle: &AppHandle, summary: &str, body: &str) {
     #[cfg(target_os = "windows")]
     {
-        let windows_app_id = app_handle.config().tauri.bundle.identifier.clone();
-
-        let tauri_result = TauriNotification::new(&windows_app_id)
-            .title(summary)
-            .body(body)
-            .show();
-
-        if let Err(err) = tauri_result {
-            println!("[NOTIFY] tauri notification failed: {}", err);
-        }
-
+        let windows_app_id = app_handle.config().identifier.clone();
         let mut notification = SystemNotification::new();
         notification
             .summary(summary)
@@ -11454,11 +11844,9 @@ fn send_system_notification(app_handle: &AppHandle, summary: &str, body: &str) {
             .appname("SlasshyVault")
             .app_id(&windows_app_id)
             .timeout(notify_rust::Timeout::Milliseconds(5000));
-
         if let Err(err) = notification.show() {
             println!("[NOTIFY] notify-rust failed: {}", err);
         }
-
         return;
     }
 
@@ -11555,7 +11943,7 @@ async fn run_watchlist_scheduler(app_handle: AppHandle) {
                 "SlasshyVault watchlist",
                 &format_watchlist_notification_body(&item),
             );
-            let _ = app_handle.emit_all("watchlist-reminder-fired", item.clone());
+            let _ = app_handle.emit("watchlist-reminder-fired", item.clone());
 
             let state = app_handle.state::<AppState>();
             if let Ok(db) = state.db.lock() {
@@ -11574,7 +11962,7 @@ async fn run_watchlist_scheduler(app_handle: AppHandle) {
                         item.id, error
                     );
                 } else {
-                    let _ = app_handle.emit_all("refresh-watchlist", ());
+                    let _ = app_handle.emit("refresh-watchlist", ());
                 }
             }
 
@@ -11629,7 +12017,7 @@ async fn run_movie_reminder_scheduler(app_handle: AppHandle) {
         for reminder in due_reminders {
             let body = format_reminder_notification_body(&reminder);
             send_system_notification(&app_handle, "SlasshyVault reminder", &body);
-            let _ = app_handle.emit_all("movie-reminder-fired", reminder.clone());
+            let _ = app_handle.emit("movie-reminder-fired", reminder.clone());
 
             if should_continue_tv_reminder(&reminder) {
                 let credential = {
@@ -11686,7 +12074,7 @@ async fn run_movie_reminder_scheduler(app_handle: AppHandle) {
                                     reminder.id, error
                                 );
                             } else {
-                                let _ = app_handle.emit_all("refresh-reminders", ());
+                                let _ = app_handle.emit("refresh-reminders", ());
                             }
                         }
                         continue;
@@ -11710,7 +12098,7 @@ async fn run_movie_reminder_scheduler(app_handle: AppHandle) {
                         reminder.id, error
                     );
                 } else {
-                    let _ = app_handle.emit_all("refresh-reminders", ());
+                    let _ = app_handle.emit("refresh-reminders", ());
                 }
             };
         }
@@ -12109,7 +12497,7 @@ fn unsupported_archive_reason(file: &gdrive::DriveItem) -> Option<String> {
     )
 }
 
-fn notify_unsupported_archives_window(window: &Window, archive_names: &[String]) {
+fn notify_unsupported_archives_window(window: &WebviewWindow, archive_names: &[String]) {
     if archive_names.is_empty() {
         return;
     }
@@ -12178,10 +12566,15 @@ fn ensure_cloud_show_with_metadata(
                 folder_id.to_string(),
             )
         } else {
-            let tmdb_result =
-                tmdb::search_metadata_with_fallback(api_key, show_title, "tv", year, image_cache_dir)
-                    .ok()
-                    .flatten();
+            let tmdb_result = tmdb::search_metadata_with_fallback(
+                api_key,
+                show_title,
+                "tv",
+                year,
+                image_cache_dir,
+            )
+            .ok()
+            .flatten();
 
             let (title, year, overview, cast_names, poster_path, tmdb_id_opt) = match &tmdb_result {
                 Some(meta) => (
@@ -12486,7 +12879,7 @@ fn index_zip_archive_without_metadata(
     Ok(indexed_items)
 }
 
-fn emit_ui_notification(window: &tauri::Window, title: &str, message: &str, kind: &str) {
+fn emit_ui_notification(window: &WebviewWindow, title: &str, message: &str, kind: &str) {
     let notification_key = format!("{}|{}|{}", kind, title, message);
     let now = std::time::Instant::now();
     let dedupe_window = Duration::from_secs(3);
@@ -12509,7 +12902,7 @@ fn emit_ui_notification(window: &tauri::Window, title: &str, message: &str, kind
     }
 }
 
-fn should_show_in_app_notification(window: &tauri::Window) -> bool {
+fn should_show_in_app_notification(window: &WebviewWindow) -> bool {
     if window.is_minimized().unwrap_or(false) {
         return false;
     }
@@ -12517,7 +12910,7 @@ fn should_show_in_app_notification(window: &tauri::Window) -> bool {
     window.is_focused().unwrap_or(false)
 }
 
-fn dispatch_notification(window: &tauri::Window, title: &str, message: &str, kind: &str) {
+fn dispatch_notification(window: &WebviewWindow, title: &str, message: &str, kind: &str) {
     emit_ui_notification(window, title, message, kind);
 
     if !should_show_in_app_notification(window) {
@@ -12531,10 +12924,10 @@ fn emit_ui_notification_from_handle(
     message: &str,
     kind: &str,
 ) {
-    if let Some(window) = app_handle.get_window("main") {
+    if let Some(window) = app_handle.get_webview_window("main") {
         dispatch_notification(&window, title, message, kind);
     } else {
-        // Window not available, send system notification only
+        // WebviewWindow not available, send system notification only
         send_system_notification(app_handle, title, message);
     }
 }
@@ -12549,7 +12942,7 @@ fn dispatch_notification_from_handle(
 }
 
 fn emit_zip_processing_event(
-    window: &tauri::Window,
+    window: &WebviewWindow,
     phase: &str,
     archive_count: usize,
     archive_name: Option<&str>,
@@ -12566,20 +12959,38 @@ fn emit_zip_processing_event(
 
     window.emit("zip-processing-status", payload).ok();
 
-    // Send Windows notification for detected / complete phases
+    // Send WebviewWindows notification for detected / complete phases
     match phase {
         "detected" => {
-            let title = format!("{} archive{} detected", archive_count, if archive_count == 1 { "" } else { "s" });
+            let title = format!(
+                "{} archive{} detected",
+                archive_count,
+                if archive_count == 1 { "" } else { "s" }
+            );
             let name = archive_name.unwrap_or("Unknown");
-            send_system_notification(&window.app_handle(), &title, &format!("Found in background scan: {}", name));
+            send_system_notification(
+                &window.app_handle(),
+                &title,
+                &format!("Found in background scan: {}", name),
+            );
         }
         "complete" => {
             let count = episodes_indexed.unwrap_or(0);
             let title = format!("📦 Indexing complete");
             let body = if count > 0 {
-                format!("{} episode{} indexed from {} archive{}", count, if count == 1 { "" } else { "s" }, archive_count, if archive_count == 1 { "" } else { "s" })
+                format!(
+                    "{} episode{} indexed from {} archive{}",
+                    count,
+                    if count == 1 { "" } else { "s" },
+                    archive_count,
+                    if archive_count == 1 { "" } else { "s" }
+                )
             } else {
-                format!("{} archive{} processed", archive_count, if archive_count == 1 { "" } else { "s" })
+                format!(
+                    "{} archive{} processed",
+                    archive_count,
+                    if archive_count == 1 { "" } else { "s" }
+                )
             };
             send_system_notification(&window.app_handle(), &title, &body);
         }
@@ -12641,7 +13052,7 @@ fn emit_zip_processing_event_from_handle(
     episodes_indexed: Option<usize>,
     message: &str,
 ) {
-    if let Some(window) = app_handle.get_window("main") {
+    if let Some(window) = app_handle.get_webview_window("main") {
         emit_zip_processing_event(
             &window,
             phase,
@@ -12679,10 +13090,17 @@ async fn background_cloud_poll(app_handle: AppHandle) {
         // Periodic zip cache cleanup (runs regardless of cloud poll results)
         if last_zip_cache_cleanup.elapsed() >= ZIP_CACHE_CLEANUP_INTERVAL {
             let zip_cache_config = {
-                let config = state.config.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let config = state
+                    .config
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 build_zip_cache_config(&config)
             };
-            match tokio::task::spawn_blocking(move || zip_manager::cleanup_stale_zip_cache(&zip_cache_config)).await {
+            match tokio::task::spawn_blocking(move || {
+                zip_manager::cleanup_stale_zip_cache(&zip_cache_config)
+            })
+            .await
+            {
                 Ok(Ok(())) => {
                     println!("[ZIP CACHE] Periodic cleanup completed");
                 }
@@ -12709,7 +13127,7 @@ async fn background_cloud_poll(app_handle: AppHandle) {
                     );
 
                     // Emit event to window if it exists
-                    if let Some(window) = app_handle.get_window("main") {
+                    if let Some(window) = app_handle.get_webview_window("main") {
                         window.emit("library-updated", ()).ok();
                     }
                 } else {
@@ -12726,7 +13144,7 @@ async fn background_cloud_poll(app_handle: AppHandle) {
     }
 }
 
-/// Background version of check_cloud_changes that doesn't require a Window parameter
+/// Background version of check_cloud_changes that doesn't require a WebviewWindow parameter
 async fn background_check_cloud_changes(
     app_handle: &AppHandle,
 ) -> Result<CloudIndexResult, String> {
@@ -12820,7 +13238,7 @@ async fn background_check_cloud_changes(
         }
 
         if !removed_titles.is_empty() {
-            if let Some(window) = app_handle.get_window("main") {
+            if let Some(window) = app_handle.get_webview_window("main") {
                 window.emit("library-updated", ()).ok();
             }
 
@@ -13258,7 +13676,10 @@ async fn background_check_cloud_changes(
 
     // Add TAR archive skip reasons
     for archive_name in &unsupported_archives {
-        skipped_reasons.push(format!("{} — TAR archives are not supported (requires sequential read)", archive_name));
+        skipped_reasons.push(format!(
+            "{} — TAR archives are not supported (requires sequential read)",
+            archive_name
+        ));
     }
     let skipped_count = skipped_count + unsupported_archives.len();
     let indexed_count = indexed_items.len();
@@ -13269,7 +13690,8 @@ async fn background_check_cloud_changes(
         let status_msg = if zip_indexed_count > 0 {
             format!(
                 "Finished processing {} ZIP archive(s). {} episode(s) added to your library.",
-                zip_files_detected.len(), zip_indexed_count
+                zip_files_detected.len(),
+                zip_indexed_count
             )
         } else {
             format!(
@@ -13279,7 +13701,11 @@ async fn background_check_cloud_changes(
         };
         emit_zip_processing_event_from_handle(
             app_handle,
-            if zip_indexed_count > 0 { "complete" } else { "warning" },
+            if zip_indexed_count > 0 {
+                "complete"
+            } else {
+                "warning"
+            },
             zip_files_detected.len(),
             archive_name,
             None,
@@ -13343,7 +13769,7 @@ async fn background_check_cloud_changes(
         }
 
         // Emit library-updated if window exists
-        if let Some(window) = app_handle.get_window("main") {
+        if let Some(window) = app_handle.get_webview_window("main") {
             window.emit("library-updated", ()).ok();
         }
     }
@@ -13469,7 +13895,7 @@ async fn background_check_cloud_changes(
             .await;
 
             // Emit library-updated again after metadata fetch
-            if let Some(window) = app_handle_clone.get_window("main") {
+            if let Some(window) = app_handle_clone.get_webview_window("main") {
                 window.emit("library-updated", ()).ok();
             }
         });
@@ -13480,7 +13906,7 @@ async fn background_check_cloud_changes(
         if let Ok(db) = database::Database::new(&db_path_merge) {
             let merged = auto_merge_duplicate_tvshows(&db, "background_check_cloud_changes");
             if merged > 0 {
-                if let Some(window) = app_handle.get_window("main") {
+                if let Some(window) = app_handle.get_webview_window("main") {
                     window.emit("library-updated", ()).ok();
                 }
             }
@@ -13493,7 +13919,11 @@ async fn background_check_cloud_changes(
         indexed_count, skipped_count, total_duration
     );
 
-    let final_skipped_reasons = if skipped_reasons.is_empty() { None } else { Some(skipped_reasons) };
+    let final_skipped_reasons = if skipped_reasons.is_empty() {
+        None
+    } else {
+        Some(skipped_reasons)
+    };
 
     // Save token AFTER indexing completes so failed files are retried on next poll
     if let Ok(db) = state.db.lock() {
@@ -13720,7 +14150,9 @@ async fn check_for_updates() -> Result<UpdateInfo, String> {
     // When versions match, check if this is a same-version re-release (hotfix)
     // by comparing the remote pub_date against the last installed pub_date.
     let is_newer = if !is_newer && latest_version == current_version {
-        if let (Some(remote_date), Some(local_date)) = (&manifest.pub_date, read_installed_pub_date()) {
+        if let (Some(remote_date), Some(local_date)) =
+            (&manifest.pub_date, read_installed_pub_date())
+        {
             let is_rerelease = remote_date > &local_date;
             if is_rerelease {
                 println!("[UPDATE] Same version but newer pub_date detected (re-release): remote={} local={}", remote_date, local_date);
@@ -13745,7 +14177,7 @@ async fn check_for_updates() -> Result<UpdateInfo, String> {
         .map(|platform| platform.url.clone());
 
     if download_url.is_none() {
-        println!("[UPDATE] WARNING: No Windows updater package found in latest.json");
+        println!("[UPDATE] WARNING: No WebviewWindows updater package found in latest.json");
         for (platform, value) in &manifest.platforms {
             println!("[UPDATE]   - {} => {}", platform, value.url);
         }
@@ -13789,7 +14221,11 @@ fn version_compare(latest: &str, current: &str) -> bool {
 
 /// Download update to temp directory
 #[tauri::command]
-async fn download_update(window: tauri::Window, url: String, pub_date: Option<String>) -> Result<String, String> {
+async fn download_update(
+    window: WebviewWindow,
+    url: String,
+    pub_date: Option<String>,
+) -> Result<String, String> {
     use std::io::Write;
 
     println!("[UPDATE] Starting download...");
@@ -14000,7 +14436,11 @@ fn read_installed_pub_date() -> Option<String> {
     match std::fs::read_to_string(&path) {
         Ok(s) => {
             let trimmed = s.trim().to_string();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
         }
         Err(_) => None,
     }
@@ -14152,7 +14592,7 @@ fn resolve_windows_installer_from_package(
 
     if ext != "zip" {
         return Err(format!(
-            "Unsupported Windows updater package: {}",
+            "Unsupported WebviewWindows updater package: {}",
             package_path.display()
         ));
     }
@@ -14260,16 +14700,19 @@ fn resolve_windows_installer_from_package(
     );
 
     installer_candidates.sort();
-    installer_candidates
-        .into_iter()
-        .next()
-        .ok_or_else(|| {
-            let mut details = String::from("No .exe, .msi, or .nsis installer found inside updater ZIP. Contents:\n");
-            for (path, size, type_tag) in &all_extracted_entries {
-                details.push_str(&format!("  [{}] {} ({} bytes)\n", type_tag, path.display(), size));
-            }
-            details
-        })
+    installer_candidates.into_iter().next().ok_or_else(|| {
+        let mut details =
+            String::from("No .exe, .msi, or .nsis installer found inside updater ZIP. Contents:\n");
+        for (path, size, type_tag) in &all_extracted_entries {
+            details.push_str(&format!(
+                "  [{}] {} ({} bytes)\n",
+                type_tag,
+                path.display(),
+                size
+            ));
+        }
+        details
+    })
 }
 
 /// Install update and restart app
@@ -14282,6 +14725,45 @@ async fn install_update(installer_path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let safe_path = resolve_windows_installer_from_package(&safe_path)
         .map_err(|e| manual_update_error("install_update", e))?;
+    #[cfg(target_os = "linux")]
+    if safe_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("appimage"))
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&safe_path)
+            .map_err(|e| {
+                manual_update_error(
+                    "install_update",
+                    format!("Failed to inspect AppImage: {}", e),
+                )
+            })?
+            .permissions();
+        permissions.set_mode(permissions.mode() | 0o111);
+        std::fs::set_permissions(&safe_path, permissions).map_err(|e| {
+            manual_update_error(
+                "install_update",
+                format!("Failed to make AppImage executable: {}", e),
+            )
+        })?;
+    }
+
+    #[cfg(target_os = "linux")]
+    if safe_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "deb" | "rpm"))
+    {
+        return Err(manual_update_error(
+            "install_update",
+            format!(
+                "Downloaded {} package. Install it with your system package manager, then restart SlasshyVault.",
+                safe_path.extension().and_then(|extension| extension.to_str()).unwrap_or("Linux")
+            ),
+        ));
+    }
+
     println!(
         "[UPDATE] Installing update from safe path: {}",
         safe_path.display()
@@ -14352,7 +14834,7 @@ mod install_update_tests {
     fn accepts_allowed_installer_in_staging_dir() {
         let installer_path = create_temp_installer(TEST_INSTALLER_NAME);
         let validated = get_valid_installer_path(installer_path.to_str().unwrap()).unwrap();
-        // canonical_path has \\?\ prefix on Windows; compare against canonicalized staging root
+        // canonical_path has \\?\ prefix on WebviewWindows; compare against canonicalized staging root
         let canonical_staging = updater_staging_root().canonicalize().unwrap();
         assert!(validated.starts_with(&canonical_staging));
         remove_test_artifact(&installer_path);
@@ -14447,31 +14929,39 @@ mod authorized_update_url_tests {
 
     #[test]
     fn rejects_http_scheme() {
-        let url = make_url("http://github.com/SlasshyOverhere/SlasshyVault/releases/download/v1/test.exe");
+        let url = make_url(
+            "http://github.com/SlasshyOverhere/SlasshyVault/releases/download/v1/test.exe",
+        );
         assert!(!is_authorized_update_url(&url, false));
     }
 
     #[test]
     fn rejects_ftp_scheme() {
-        let url = make_url("ftp://github.com/SlasshyOverhere/SlasshyVault/releases/download/v1/test.exe");
+        let url =
+            make_url("ftp://github.com/SlasshyOverhere/SlasshyVault/releases/download/v1/test.exe");
         assert!(!is_authorized_update_url(&url, false));
     }
 
     #[test]
     fn allows_github_https_with_correct_repo() {
-        let url = make_url(&format!("https://github.com/{}/releases/download/v1/test.exe", ALLOWED_REPO));
+        let url = make_url(&format!(
+            "https://github.com/{}/releases/download/v1/test.exe",
+            ALLOWED_REPO
+        ));
         assert!(is_authorized_update_url(&url, false));
     }
 
     #[test]
     fn rejects_wrong_github_repo() {
-        let url = make_url("https://github.com/SomeOtherOrg/SomeOtherRepo/releases/download/v1/test.exe");
+        let url =
+            make_url("https://github.com/SomeOtherOrg/SomeOtherRepo/releases/download/v1/test.exe");
         assert!(!is_authorized_update_url(&url, false));
     }
 
     #[test]
     fn rejects_non_github_host() {
-        let url = make_url("https://evil.com/SlasshyOverhere/SlasshyVault/releases/download/v1/test.exe");
+        let url =
+            make_url("https://evil.com/SlasshyOverhere/SlasshyVault/releases/download/v1/test.exe");
         assert!(!is_authorized_update_url(&url, false));
     }
 
@@ -14489,7 +14979,10 @@ mod authorized_update_url_tests {
 
     #[test]
     fn allows_www_github_host() {
-        let url = make_url(&format!("https://www.github.com/{}/releases/download/v1/test.exe", ALLOWED_REPO));
+        let url = make_url(&format!(
+            "https://www.github.com/{}/releases/download/v1/test.exe",
+            ALLOWED_REPO
+        ));
         assert!(is_authorized_update_url(&url, false));
     }
 
@@ -14510,8 +15003,13 @@ mod sanitize_filename_tests {
 
     #[test]
     fn extracts_filename_from_url() {
-        let url = make_url("https://github.com/org/repo/releases/download/v1/SlasshyVault-Setup-3.0.57.exe");
-        assert_eq!(sanitize_update_filename(&url), "SlasshyVault-Setup-3.0.57.exe");
+        let url = make_url(
+            "https://github.com/org/repo/releases/download/v1/SlasshyVault-Setup-3.0.57.exe",
+        );
+        assert_eq!(
+            sanitize_update_filename(&url),
+            "SlasshyVault-Setup-3.0.57.exe"
+        );
     }
 
     #[test]
@@ -14612,32 +15110,50 @@ mod container_name_tests {
 
     #[test]
     fn normalizes_matroska() {
-        assert_eq!(normalize_container_name(Some("matroska"), None), Some("MKV".to_string()));
+        assert_eq!(
+            normalize_container_name(Some("matroska"), None),
+            Some("MKV".to_string())
+        );
     }
 
     #[test]
     fn normalizes_mov_mp4_variant() {
-        assert_eq!(normalize_container_name(Some("mov,mp4,m4a,3gp,3g2,mj2"), None), Some("MP4".to_string()));
+        assert_eq!(
+            normalize_container_name(Some("mov,mp4,m4a,3gp,3g2,mj2"), None),
+            Some("MP4".to_string())
+        );
     }
 
     #[test]
     fn normalizes_avi() {
-        assert_eq!(normalize_container_name(Some("avi"), None), Some("AVI".to_string()));
+        assert_eq!(
+            normalize_container_name(Some("avi"), None),
+            Some("AVI".to_string())
+        );
     }
 
     #[test]
     fn normalizes_webm() {
-        assert_eq!(normalize_container_name(Some("webm"), None), Some("WEBM".to_string()));
+        assert_eq!(
+            normalize_container_name(Some("webm"), None),
+            Some("WEBM".to_string())
+        );
     }
 
     #[test]
     fn normalizes_mpegts() {
-        assert_eq!(normalize_container_name(Some("mpegts"), None), Some("TS".to_string()));
+        assert_eq!(
+            normalize_container_name(Some("mpegts"), None),
+            Some("TS".to_string())
+        );
     }
 
     #[test]
     fn falls_back_to_extension() {
-        assert_eq!(normalize_container_name(None, Some("mkv")), Some("MKV".to_string()));
+        assert_eq!(
+            normalize_container_name(None, Some("mkv")),
+            Some("MKV".to_string())
+        );
     }
 
     #[test]
@@ -14647,12 +15163,18 @@ mod container_name_tests {
 
     #[test]
     fn handles_case_insensitive() {
-        assert_eq!(normalize_container_name(Some("MATROSKA"), None), Some("MKV".to_string()));
+        assert_eq!(
+            normalize_container_name(Some("MATROSKA"), None),
+            Some("MKV".to_string())
+        );
     }
 
     #[test]
     fn unknown_format_uppercased() {
-        assert_eq!(normalize_container_name(Some("flac"), None), Some("FLAC".to_string()));
+        assert_eq!(
+            normalize_container_name(Some("flac"), None),
+            Some("FLAC".to_string())
+        );
     }
 }
 
@@ -14662,27 +15184,42 @@ mod resolution_label_tests {
 
     #[test]
     fn detects_4k() {
-        assert_eq!(resolution_label_from_dimensions(Some(3840), Some(2160)), Some("2160p".to_string()));
+        assert_eq!(
+            resolution_label_from_dimensions(Some(3840), Some(2160)),
+            Some("2160p".to_string())
+        );
     }
 
     #[test]
     fn detects_1440p() {
-        assert_eq!(resolution_label_from_dimensions(Some(2560), Some(1440)), Some("1440p".to_string()));
+        assert_eq!(
+            resolution_label_from_dimensions(Some(2560), Some(1440)),
+            Some("1440p".to_string())
+        );
     }
 
     #[test]
     fn detects_1080p() {
-        assert_eq!(resolution_label_from_dimensions(Some(1920), Some(1080)), Some("1080p".to_string()));
+        assert_eq!(
+            resolution_label_from_dimensions(Some(1920), Some(1080)),
+            Some("1080p".to_string())
+        );
     }
 
     #[test]
     fn detects_720p() {
-        assert_eq!(resolution_label_from_dimensions(Some(1280), Some(720)), Some("720p".to_string()));
+        assert_eq!(
+            resolution_label_from_dimensions(Some(1280), Some(720)),
+            Some("720p".to_string())
+        );
     }
 
     #[test]
     fn uses_raw_height_for_small() {
-        assert_eq!(resolution_label_from_dimensions(Some(640), Some(360)), Some("360p".to_string()));
+        assert_eq!(
+            resolution_label_from_dimensions(Some(640), Some(360)),
+            Some("360p".to_string())
+        );
     }
 
     #[test]
@@ -14698,12 +15235,18 @@ mod resolution_label_tests {
 
     #[test]
     fn handles_width_only_default() {
-        assert_eq!(resolution_label_from_dimensions(None, Some(1080)), Some("1080p".to_string()));
+        assert_eq!(
+            resolution_label_from_dimensions(None, Some(1080)),
+            Some("1080p".to_string())
+        );
     }
 
     #[test]
     fn detects_4k_by_height_only() {
-        assert_eq!(resolution_label_from_dimensions(None, Some(2160)), Some("2160p".to_string()));
+        assert_eq!(
+            resolution_label_from_dimensions(None, Some(2160)),
+            Some("2160p".to_string())
+        );
     }
 }
 
@@ -14713,32 +15256,50 @@ mod language_inference_tests {
 
     #[test]
     fn recognizes_en() {
-        assert_eq!(infer_language_from_text("en"), Some(("en", "English", "en,eng,english")));
+        assert_eq!(
+            infer_language_from_text("en"),
+            Some(("en", "English", "en,eng,english"))
+        );
     }
 
     #[test]
     fn recognizes_eng() {
-        assert_eq!(infer_language_from_text("eng"), Some(("en", "English", "en,eng,english")));
+        assert_eq!(
+            infer_language_from_text("eng"),
+            Some(("en", "English", "en,eng,english"))
+        );
     }
 
     #[test]
     fn recognizes_english() {
-        assert_eq!(infer_language_from_text("English"), Some(("en", "English", "en,eng,english")));
+        assert_eq!(
+            infer_language_from_text("English"),
+            Some(("en", "English", "en,eng,english"))
+        );
     }
 
     #[test]
     fn recognizes_hindi() {
-        assert_eq!(infer_language_from_text("hi"), Some(("hi", "Hindi", "hi,hin,hindi")));
+        assert_eq!(
+            infer_language_from_text("hi"),
+            Some(("hi", "Hindi", "hi,hin,hindi"))
+        );
     }
 
     #[test]
     fn recognizes_japanese() {
-        assert_eq!(infer_language_from_text("ja"), Some(("ja", "Japanese", "ja,jpn,japanese")));
+        assert_eq!(
+            infer_language_from_text("ja"),
+            Some(("ja", "Japanese", "ja,jpn,japanese"))
+        );
     }
 
     #[test]
     fn recognizes_unknown_with_english_substring() {
-        assert_eq!(infer_language_from_text("English 5.1"), Some(("en", "English", "en,eng,english")));
+        assert_eq!(
+            infer_language_from_text("English 5.1"),
+            Some(("en", "English", "en,eng,english"))
+        );
     }
 
     #[test]
@@ -14753,12 +15314,18 @@ mod language_inference_tests {
 
     #[test]
     fn trims_whitespace() {
-        assert_eq!(infer_language_from_text("  en  "), Some(("en", "English", "en,eng,english")));
+        assert_eq!(
+            infer_language_from_text("  en  "),
+            Some(("en", "English", "en,eng,english"))
+        );
     }
 
     #[test]
     fn recognizes_german_deu() {
-        assert_eq!(infer_language_from_text("deu"), Some(("de", "German", "de,deu,german")));
+        assert_eq!(
+            infer_language_from_text("deu"),
+            Some(("de", "German", "de,deu,german"))
+        );
     }
 
     #[test]
@@ -14768,7 +15335,10 @@ mod language_inference_tests {
 
     #[test]
     fn recognizes_spanish() {
-        assert_eq!(infer_language_from_text("es"), Some(("es", "Spanish", "es,spa,spanish")));
+        assert_eq!(
+            infer_language_from_text("es"),
+            Some(("es", "Spanish", "es,spa,spanish"))
+        );
     }
 }
 
@@ -14875,7 +15445,10 @@ mod notification_format_tests {
 
 #[cfg(test)]
 mod reminder_validation_tests {
-    use super::{validate_reminder_input, validate_tracking_mode, normalize_tracking_mode, MovieReminderInput};
+    use super::{
+        normalize_tracking_mode, validate_reminder_input, validate_tracking_mode,
+        MovieReminderInput,
+    };
 
     fn valid_input() -> MovieReminderInput {
         MovieReminderInput {
@@ -14960,7 +15533,9 @@ mod reminder_validation_tests {
 
 #[cfg(test)]
 mod watchlist_validation_tests {
-    use super::{validate_watchlist_input, normalize_watchlist_notification_mode, WatchlistItemInput};
+    use super::{
+        normalize_watchlist_notification_mode, validate_watchlist_input, WatchlistItemInput,
+    };
 
     fn valid_input() -> WatchlistItemInput {
         WatchlistItemInput {
@@ -15039,14 +15614,20 @@ mod watchlist_validation_tests {
     #[test]
     fn normalize_single_mode() {
         let input = valid_input();
-        assert_eq!(normalize_watchlist_notification_mode(&input).unwrap(), "single");
+        assert_eq!(
+            normalize_watchlist_notification_mode(&input).unwrap(),
+            "single"
+        );
     }
 
     #[test]
     fn normalize_spam_mode() {
         let mut input = valid_input();
         input.notification_mode = Some("spam".to_string());
-        assert_eq!(normalize_watchlist_notification_mode(&input).unwrap(), "spam");
+        assert_eq!(
+            normalize_watchlist_notification_mode(&input).unwrap(),
+            "spam"
+        );
     }
 
     #[test]
@@ -15144,8 +15725,14 @@ mod compute_hash_tests {
         let path1 = temp_file_path();
         let path2 = temp_file_path();
         let data = b"deterministic content for hash test";
-        std::fs::File::create(&path1).unwrap().write_all(data).unwrap();
-        std::fs::File::create(&path2).unwrap().write_all(data).unwrap();
+        std::fs::File::create(&path1)
+            .unwrap()
+            .write_all(data)
+            .unwrap();
+        std::fs::File::create(&path2)
+            .unwrap()
+            .write_all(data)
+            .unwrap();
 
         let h1 = compute_partial_hash(path1.to_str().unwrap());
         let h2 = compute_partial_hash(path2.to_str().unwrap());
@@ -15170,20 +15757,30 @@ mod augment_match_key_tests {
     #[test]
     fn returns_none_when_no_path() {
         // Function early-returns None via ? operator when file_path is None
-        assert_eq!(augment_match_key_with_phash(Some("key".to_string()), None), None);
+        assert_eq!(
+            augment_match_key_with_phash(Some("key".to_string()), None),
+            None
+        );
     }
 
     #[test]
     fn returns_key_when_path_empty() {
-        assert_eq!(augment_match_key_with_phash(Some("key".to_string()), Some("")), Some("key".to_string()));
+        assert_eq!(
+            augment_match_key_with_phash(Some("key".to_string()), Some("")),
+            Some("key".to_string())
+        );
     }
 
     #[test]
     fn appends_phash_when_file_exists() {
         let path = std::env::temp_dir().join(format!("phash_test_{}", Uuid::new_v4()));
-        std::fs::File::create(&path).unwrap().write_all(b"test data").unwrap();
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(b"test data")
+            .unwrap();
 
-        let result = augment_match_key_with_phash(Some("key".to_string()), Some(path.to_str().unwrap()));
+        let result =
+            augment_match_key_with_phash(Some("key".to_string()), Some(path.to_str().unwrap()));
         assert!(result.is_some());
         let val = result.unwrap();
         assert!(val.starts_with("key|phash:"));
@@ -15194,7 +15791,10 @@ mod augment_match_key_tests {
     #[test]
     fn phash_only_when_no_existing_key() {
         let path = std::env::temp_dir().join(format!("phash_test_{}", Uuid::new_v4()));
-        std::fs::File::create(&path).unwrap().write_all(b"test data").unwrap();
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(b"test data")
+            .unwrap();
 
         let result = augment_match_key_with_phash(None, Some(path.to_str().unwrap()));
         assert!(result.is_some());
@@ -15207,7 +15807,10 @@ mod augment_match_key_tests {
 
 #[cfg(test)]
 mod runtime_tests {
-    use super::{is_dev_runtime, updater_staging_root, runtime_window_title, runtime_app_identifier, runtime_deep_link_scheme};
+    use super::{
+        is_dev_runtime, runtime_app_identifier, runtime_deep_link_scheme, runtime_window_title,
+        updater_staging_root,
+    };
 
     #[test]
     fn is_dev_runtime_returns_bool() {
@@ -15351,7 +15954,7 @@ fn augment_match_key_with_phash(
 #[tauri::command]
 async fn wt_create_room(
     state: State<'_, AppState>,
-    window: Window,
+    window: WebviewWindow,
     media_id: i64,
     title: String,
     media_match_key: Option<String>,
@@ -15450,7 +16053,7 @@ async fn wt_create_room(
 #[tauri::command]
 async fn wt_join_room(
     state: State<'_, AppState>,
-    window: Window,
+    window: WebviewWindow,
     room_code: String,
     media_id: i64,
     media_title: Option<String>,
@@ -15610,7 +16213,7 @@ async fn wt_get_client_id(state: State<'_, AppState>) -> Result<Option<String>, 
 #[tauri::command]
 async fn wt_launch_mpv(
     state: State<'_, AppState>,
-    window: Window,
+    window: WebviewWindow,
     media_id: i64,
     session_id: String,
     start_position: f64,
@@ -16009,7 +16612,7 @@ async fn run_startup_metadata_enrichment(app_handle: AppHandle) {
     );
 
     if updated > 0 {
-        if let Some(window) = app_handle.get_window("main") {
+        if let Some(window) = app_handle.get_webview_window("main") {
             let _ = window.emit(
                 "library-updated",
                 serde_json::json!({ "type": "metadata-enriched", "updated": updated }),
@@ -16029,7 +16632,7 @@ async fn ddl_validate_url(url: String) -> Result<direct_link_manager::DdlValidat
 
 #[tauri::command]
 async fn ddl_index_archive(
-    window: Window,
+    window: WebviewWindow,
     state: tauri::State<'_, AppState>,
     url: String,
     validation: direct_link_manager::DdlValidationResult,
@@ -16554,7 +17157,7 @@ fn ddl_get_source_media(
 /// Index a season pack stream URL into Direct Links, storing addon origin for auto-refresh
 #[tauri::command]
 async fn index_season_pack_to_ddl(
-    window: Window,
+    window: WebviewWindow,
     state: tauri::State<'_, AppState>,
     url: String,
     imdb_id: String,
@@ -16565,14 +17168,16 @@ async fn index_season_pack_to_ddl(
 
     // Validate URL — must support HTTP 206 (range requests)
     let url_clone = url.clone();
-    let validation = tokio::task::spawn_blocking(move || {
-        direct_link_manager::validate_url(&url_clone)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    let validation =
+        tokio::task::spawn_blocking(move || direct_link_manager::validate_url(&url_clone))
+            .await
+            .map_err(|e| e.to_string())??;
 
     if !validation.supports_range {
-        return Err("This stream URL does not support seeking (HTTP 206). Cannot index to Direct Links.".to_string());
+        return Err(
+            "This stream URL does not support seeking (HTTP 206). Cannot index to Direct Links."
+                .to_string(),
+        );
     }
 
     // Delegate to ddl_index_archive with addon_origin
@@ -16601,12 +17206,19 @@ async fn auto_refresh_ddl_from_addon(
         return Ok(None);
     }
     let imdb_id = parts[0].clone();
-    let season: i32 = parts[1].parse().map_err(|_| "Invalid season in addon_origin".to_string())?;
+    let season: i32 = parts[1]
+        .parse()
+        .map_err(|_| "Invalid season in addon_origin".to_string())?;
 
     // Get addon URL from config
     let addon_url = {
         let config = state.config.lock().map_err(|e| e.to_string())?;
-        if let Some(src) = config.addon_sources.iter().find(|s| s.is_default).or(config.addon_sources.first()) {
+        if let Some(src) = config
+            .addon_sources
+            .iter()
+            .find(|s| s.is_default)
+            .or(config.addon_sources.first())
+        {
             src.url.clone()
         } else if let Some(ref url) = config.addon_url {
             url.clone()
@@ -16623,7 +17235,8 @@ async fn auto_refresh_ddl_from_addon(
     let stream_name_fallback = parts.get(2).cloned().unwrap_or_default();
 
     let new_url = tokio::task::spawn_blocking(move || {
-        let streams = remote_source::fetch_season_streams(&imdb_id, season, &addon_url_clone, true)?;
+        let streams =
+            remote_source::fetch_season_streams(&imdb_id, season, &addon_url_clone, true)?;
 
         // Find matching stream by file_size
         for (_ep, ep_streams) in &streams {
@@ -16660,10 +17273,16 @@ async fn auto_refresh_ddl_from_addon(
         let db = state.db.lock().map_err(|e| e.to_string())?;
         db.update_ddl_source_url(&source_id, &new_url)
             .map_err(|e| e.to_string())?;
-        println!("[DDL] Auto-refreshed expired link for source '{}' from addon", source_id);
+        println!(
+            "[DDL] Auto-refreshed expired link for source '{}' from addon",
+            source_id
+        );
         Ok(Some(new_url))
     } else {
-        println!("[DDL] Auto-refresh failed for source '{}': {}", source_id, refresh_result.message);
+        println!(
+            "[DDL] Auto-refresh failed for source '{}': {}",
+            source_id, refresh_result.message
+        );
         Ok(None)
     }
 }
@@ -16774,7 +17393,11 @@ fn migrate_app_data() {
 // ── Progressive Download Helpers ─────────────────────────────────────
 
 /// Download the first `buffer_bytes` from `url` to `dest_path` using an HTTP Range request.
-async fn progressive_download(url: &str, dest_path: &std::path::Path, buffer_bytes: u64) -> Result<(), String> {
+async fn progressive_download(
+    url: &str,
+    dest_path: &std::path::Path,
+    buffer_bytes: u64,
+) -> Result<(), String> {
     use reqwest::header;
 
     // Ensure parent directory exists
@@ -16811,7 +17434,8 @@ async fn progressive_download(url: &str, dest_path: &std::path::Path, buffer_byt
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("chunk read: {}", e))?;
         use std::io::Write;
-        file.write_all(&chunk).map_err(|e| format!("file write: {}", e))?;
+        file.write_all(&chunk)
+            .map_err(|e| format!("file write: {}", e))?;
         bytes_written += chunk.len() as u64;
         if bytes_written >= buffer_bytes {
             break;
@@ -16820,12 +17444,21 @@ async fn progressive_download(url: &str, dest_path: &std::path::Path, buffer_byt
 
     use std::io::Write as _;
     file.flush().map_err(|e| format!("file flush: {}", e))?;
-    println!("[PROGRESSIVE-DL] Downloaded {} bytes to {}", bytes_written, dest_path.display());
+    println!(
+        "[PROGRESSIVE-DL] Downloaded {} bytes to {}",
+        bytes_written,
+        dest_path.display()
+    );
     Ok(())
 }
 
 /// Continue downloading from `buffer_bytes` offset to the end of the file.
-async fn download_remaining(url: &str, dest_path: &std::path::Path, start_offset: u64, _total_bytes: u64) -> Result<(), String> {
+async fn download_remaining(
+    url: &str,
+    dest_path: &std::path::Path,
+    start_offset: u64,
+    _total_bytes: u64,
+) -> Result<(), String> {
     use reqwest::header;
 
     let client = reqwest::Client::builder()
@@ -16862,13 +17495,18 @@ async fn download_remaining(url: &str, dest_path: &std::path::Path, start_offset
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("chunk read: {}", e))?;
         use std::io::Write;
-        file.write_all(&chunk).map_err(|e| format!("file write: {}", e))?;
+        file.write_all(&chunk)
+            .map_err(|e| format!("file write: {}", e))?;
         bytes_written += chunk.len() as u64;
     }
 
     use std::io::Write as _;
     file.flush().map_err(|e| format!("file flush: {}", e))?;
-    println!("[PROGRESSIVE-DL] Downloaded remaining {} bytes (total offset {})", bytes_written, start_offset + bytes_written);
+    println!(
+        "[PROGRESSIVE-DL] Downloaded remaining {} bytes (total offset {})",
+        bytes_written,
+        start_offset + bytes_written
+    );
     Ok(())
 }
 
@@ -17124,7 +17762,11 @@ async fn remote_play_with_mpv(
         .spawn()
         .map_err(|e| format!("Failed to launch MPV: {}", e))?;
 
-    println!("[REMOTE-MPV] Launched MPV (PID: {}) for '{}'", child.id(), title);
+    println!(
+        "[REMOTE-MPV] Launched MPV (PID: {}) for '{}'",
+        child.id(),
+        title
+    );
 
     // Background thread: wait for MPV to exit, emit ended event
     let title_clone = title.clone();
@@ -17132,10 +17774,13 @@ async fn remote_play_with_mpv(
     std::thread::spawn(move || {
         let _ = child.wait();
         println!("[REMOTE-MPV] Playback ended for '{}'", title_clone);
-        let _ = app_clone.emit_all("mpv-playback-ended", serde_json::json!({
-            "completed": false,
-            "title": title_clone,
-        }));
+        let _ = app_clone.emit(
+            "mpv-playback-ended",
+            serde_json::json!({
+                "completed": false,
+                "title": title_clone,
+            }),
+        );
     });
 
     Ok(RemotePlaybackResponse {
@@ -17148,10 +17793,7 @@ async fn remote_play_with_mpv(
 }
 
 #[tauri::command]
-async fn remote_clear_progress(
-    state: State<'_, AppState>,
-    media_id: i64,
-) -> Result<(), String> {
+async fn remote_clear_progress(state: State<'_, AppState>, media_id: i64) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.clear_progress(media_id).map_err(|e| e.to_string())
 }
@@ -17168,7 +17810,8 @@ async fn remote_get_resume_info(
 ) -> Result<RemotePlaybackResponse, String> {
     let tmdb_str = tmdb_id.to_string();
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    let progress = db.get_progress_for_item(&tmdb_str, &media_type, season_number, episode_number)
+    let progress = db
+        .get_progress_for_item(&tmdb_str, &media_type, season_number, episode_number)
         .map_err(|e| e.to_string())?;
     match progress {
         Some(p) if p.duration_seconds > 0.0 => {
@@ -17181,7 +17824,13 @@ async fn remote_get_resume_info(
                 progress_percent: percent,
             })
         }
-        _ => Ok(RemotePlaybackResponse { media_id: 0, has_resume: false, position: 0.0, duration: 0.0, progress_percent: 0.0 }),
+        _ => Ok(RemotePlaybackResponse {
+            media_id: 0,
+            has_resume: false,
+            position: 0.0,
+            duration: 0.0,
+            progress_percent: 0.0,
+        }),
     }
 }
 
@@ -17205,10 +17854,7 @@ async fn remote_start_cache(
 }
 
 #[tauri::command]
-async fn remote_stop_cache(
-    state: State<'_, AppState>,
-    cache_key: String,
-) -> Result<(), String> {
+async fn remote_stop_cache(state: State<'_, AppState>, cache_key: String) -> Result<(), String> {
     state.cache_manager.stop(&cache_key)
 }
 
@@ -17228,17 +17874,12 @@ async fn remote_get_all_cache_status(
 }
 
 #[tauri::command]
-async fn remote_cleanup_cache(
-    state: State<'_, AppState>,
-    cache_key: String,
-) -> Result<(), String> {
+async fn remote_cleanup_cache(state: State<'_, AppState>, cache_key: String) -> Result<(), String> {
     state.cache_manager.cleanup(&cache_key)
 }
 
 #[tauri::command]
-async fn remote_cleanup_all_cache(
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+async fn remote_cleanup_all_cache(state: State<'_, AppState>) -> Result<(), String> {
     state.cache_manager.cleanup_all()
 }
 
@@ -17257,7 +17898,8 @@ async fn remote_remove_from_library(
     media_type: String,
 ) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.remove_remote_bookmark(&tmdb_id, &media_type).map_err(|e| e.to_string())
+    db.remove_remote_bookmark(&tmdb_id, &media_type)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -17281,7 +17923,8 @@ async fn remote_is_bookmarked(
     media_type: String,
 ) -> Result<bool, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.is_remote_bookmarked(&tmdb_id, &media_type).map_err(|e| e.to_string())
+    db.is_remote_bookmarked(&tmdb_id, &media_type)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -17295,8 +17938,15 @@ async fn remote_update_progress(
     duration_seconds: f64,
 ) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.upsert_playback_progress(&tmdb_id, &media_type, season_number, episode_number, resume_position_seconds, duration_seconds)
-        .map_err(|e| e.to_string())
+    db.upsert_playback_progress(
+        &tmdb_id,
+        &media_type,
+        season_number,
+        episode_number,
+        resume_position_seconds,
+        duration_seconds,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -17305,7 +17955,8 @@ async fn remote_get_show_progress(
     tmdb_id: String,
 ) -> Result<Vec<crate::database::RemotePlaybackProgress>, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.get_all_progress_for_show(&tmdb_id).map_err(|e| e.to_string())
+    db.get_all_progress_for_show(&tmdb_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -17317,17 +17968,13 @@ async fn remote_get_all_progress(
 }
 
 #[tauri::command]
-async fn remote_is_cache_dir_set(
-    state: State<'_, AppState>,
-) -> Result<bool, String> {
+async fn remote_is_cache_dir_set(state: State<'_, AppState>) -> Result<bool, String> {
     let config = state.config.lock().map_err(|e| e.to_string())?;
     Ok(stream_cache::CacheManager::is_cache_dir_set(&config))
 }
 
 #[tauri::command]
-async fn remote_get_cache_dir(
-    state: State<'_, AppState>,
-) -> Result<String, String> {
+async fn remote_get_cache_dir(state: State<'_, AppState>) -> Result<String, String> {
     let config = state.config.lock().map_err(|e| e.to_string())?;
     let dir = stream_cache::CacheManager::cache_dir(&config);
     Ok(dir.to_string_lossy().to_string())
@@ -17339,7 +17986,11 @@ fn get_active_addon_url_from_config(config: &config::Config) -> Result<String, S
     // Try addon_sources first
     if !config.addon_sources.is_empty() {
         // Find default source
-        if let Some(src) = config.addon_sources.iter().find(|s| s.is_default && s.enabled) {
+        if let Some(src) = config
+            .addon_sources
+            .iter()
+            .find(|s| s.is_default && s.enabled)
+        {
             return Ok(src.url.clone());
         }
         // Fall back to first enabled source
@@ -17397,9 +18048,7 @@ fn validate_addon_url(url_str: &str) -> Result<(), String> {
 
     // Allow localhost, loopback, and private IPs for local addon servers
     // Only block truly dangerous patterns
-    if host_lower == "localhost.localdomain"
-        || host_lower.ends_with(".localhost")
-    {
+    if host_lower == "localhost.localdomain" || host_lower.ends_with(".localhost") {
         return Err("Invalid hostname.".to_string());
     }
 
@@ -17414,7 +18063,10 @@ fn validate_addon_url(url_str: &str) -> Result<(), String> {
     }
 
     // Block IPv6 private/loopback
-    if let Ok(ip) = host.trim_matches(|c| c == '[' || c == ']').parse::<std::net::Ipv6Addr>() {
+    if let Ok(ip) = host
+        .trim_matches(|c| c == '[' || c == ']')
+        .parse::<std::net::Ipv6Addr>()
+    {
         if ip.is_loopback() {
             return Err("Loopback IPv6 address is not allowed.".to_string());
         }
@@ -17503,7 +18155,13 @@ fn remove_addon_source(state: State<'_, AppState>, id: String) -> Result<(), Str
                 let _ = child.kill();
             }
         }
-        if ADDON_WATCHDOG_RUNNING.lock().map(|mut g| { *g = false; }).is_err() {
+        if ADDON_WATCHDOG_RUNNING
+            .lock()
+            .map(|mut g| {
+                *g = false;
+            })
+            .is_err()
+        {
             eprintln!("[remove_addon_source] Watchdog lock poisoned");
         }
     }
@@ -17540,7 +18198,7 @@ async fn install_addon_binary(
     // Validate extension
     let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("");
     if cfg!(target_os = "windows") && ext != "exe" {
-        return Err("On Windows, the binary must be an .exe file".to_string());
+        return Err("On WebviewWindows, the binary must be an .exe file".to_string());
     }
 
     // Validate binary by running --version
@@ -17551,7 +18209,8 @@ async fn install_addon_binary(
         use std::os::windows::process::CommandExt;
         version_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
-    let output = version_cmd.output()
+    let output = version_cmd
+        .output()
         .await
         .map_err(|e| format!("Failed to run binary: {}", e))?;
     if !output.status.success() {
@@ -17567,12 +18226,29 @@ async fn install_addon_binary(
     std::fs::create_dir_all(&bin_dir).map_err(|e| format!("Cannot create bin dir: {}", e))?;
 
     let dest_name = if cfg!(target_os = "windows") {
-        format!("addon-proxy-{}.exe", uuid::Uuid::new_v4().to_string()[..8].to_string())
+        format!(
+            "addon-proxy-{}.exe",
+            uuid::Uuid::new_v4().to_string()[..8].to_string()
+        )
     } else {
-        format!("addon-proxy-{}", uuid::Uuid::new_v4().to_string()[..8].to_string())
+        format!(
+            "addon-proxy-{}",
+            uuid::Uuid::new_v4().to_string()[..8].to_string()
+        )
     };
     let dest = bin_dir.join(&dest_name);
     std::fs::copy(src, &dest).map_err(|e| format!("Cannot copy binary: {}", e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&dest)
+            .map_err(|e| format!("Cannot inspect copied binary: {}", e))?
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&dest, permissions)
+            .map_err(|e| format!("Cannot make addon executable: {}", e))?;
+    }
 
     let dest_path = dest.to_string_lossy().to_string();
     let source_name = name.unwrap_or_else(|| "Custom Addon Binary".to_string());
@@ -17602,7 +18278,12 @@ async fn install_addon_binary(
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            match start_addon_process(&dest_path, &["--yes".to_string(), "--port".to_string(), port.to_string()]).await {
+            match start_addon_process(
+                &dest_path,
+                &["--yes".to_string(), "--port".to_string(), port.to_string()],
+            )
+            .await
+            {
                 Ok(_) => println!("[addon] Binary started after install on port {}", port),
                 Err(e) => eprintln!("[addon] Failed to start binary after install: {}", e),
             }
@@ -17630,8 +18311,12 @@ fn remove_addon_binary(state: State<'_, AppState>, source_id: String) -> Result<
 #[tauri::command]
 async fn restart_addon(state: State<'_, AppState>) -> Result<(), String> {
     // Reset crash state
-    if let Ok(mut cnt) = ADDON_RESTART_COUNT.lock() { *cnt = 0; }
-    if let Ok(mut guard) = ADDON_WATCHDOG_RUNNING.lock() { *guard = false; }
+    if let Ok(mut cnt) = ADDON_RESTART_COUNT.lock() {
+        *cnt = 0;
+    }
+    if let Ok(mut guard) = ADDON_WATCHDOG_RUNNING.lock() {
+        *guard = false;
+    }
 
     // Kill existing process
     if let Ok(mut proc) = RUNNING_ADDON_PROCESS.lock() {
@@ -17642,12 +18327,22 @@ async fn restart_addon(state: State<'_, AppState>) -> Result<(), String> {
 
     // Find the default binary source
     let config = state.config.lock().map_err(|e| e.to_string())?;
-    let source = config.addon_sources.iter()
+    let source = config
+        .addon_sources
+        .iter()
         .find(|s| s.enabled && s.binary_path.is_some() && s.is_default)
-        .or_else(|| config.addon_sources.iter().find(|s| s.enabled && s.binary_path.is_some()))
+        .or_else(|| {
+            config
+                .addon_sources
+                .iter()
+                .find(|s| s.enabled && s.binary_path.is_some())
+        })
         .ok_or("No binary addon source found")?;
     let bp = source.binary_path.clone().unwrap();
-    let port = source.url.split(':').last()
+    let port = source
+        .url
+        .split(':')
+        .last()
         .and_then(|p| p.trim_end_matches('/').parse::<u16>().ok())
         .unwrap_or(51546);
     let args: Vec<String> = vec!["--yes".to_string(), "--port".to_string(), port.to_string()];
@@ -17672,7 +18367,8 @@ async fn find_free_port() -> Result<u16, String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| format!("Cannot bind to free port: {}", e))?;
-    let port = listener.local_addr()
+    let port = listener
+        .local_addr()
         .map_err(|e| format!("Cannot get port: {}", e))?
         .port();
     drop(listener);
@@ -17692,17 +18388,29 @@ async fn get_addon_version_from_url(url: &str) -> Option<String> {
                 use std::io::Read;
                 let mut body = String::new();
                 let _ = reader.read_to_string(&mut body);
-                serde_json::from_str::<serde_json::Value>(&body).ok()
-                    .and_then(|v| v.get("version").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("version")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    })
             }
             _ => None,
         }
     } else {
         let client = crate::http_client::shared_client();
-        match client.get(&version_url).timeout(std::time::Duration::from_secs(2)).send() {
+        match client
+            .get(&version_url)
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+        {
             Ok(resp) if resp.status().is_success() => {
-                resp.json::<serde_json::Value>().ok()
-                    .and_then(|v| v.get("version").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                resp.json::<serde_json::Value>().ok().and_then(|v| {
+                    v.get("version")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
             }
             _ => None,
         }
@@ -17736,7 +18444,10 @@ fn check_addon_server(url: String) -> bool {
 /// Get the addon log history (last 200 lines)
 #[tauri::command]
 fn get_addon_logs() -> Vec<String> {
-    ADDON_LOG_HISTORY.lock().map(|h| h.clone()).unwrap_or_default()
+    ADDON_LOG_HISTORY
+        .lock()
+        .map(|h| h.clone())
+        .unwrap_or_default()
 }
 
 /// Get addon version from its /version endpoint
@@ -17770,7 +18481,6 @@ fn set_active_source(state: State<'_, AppState>, id: String) -> Result<(), Strin
     Ok(())
 }
 
-
 /// Enable/disable an addon source
 #[tauri::command]
 fn toggle_addon_source(
@@ -17786,7 +18496,9 @@ fn toggle_addon_source(
         .ok_or("Source not found")?;
     src.enabled = enabled;
     // Keep legacy addon_url in sync with the default source
-    config.addon_url = config.addon_sources.iter()
+    config.addon_url = config
+        .addon_sources
+        .iter()
         .find(|s| s.is_default && s.enabled)
         .map(|s| s.url.clone());
     config::save_config(&config).map_err(|e| e.to_string())?;
@@ -17815,7 +18527,6 @@ async fn auto_setup_addon() -> Result<Option<config::AddonSource>, String> {
     Ok(None)
 }
 
-
 /// Start an addon binary process and store it globally.
 /// Spawns the binary directly with CREATE_NO_WINDOW.
 async fn spawn_addon_child(binary_path: &str, args: &[String]) -> Result<(), String> {
@@ -17830,7 +18541,8 @@ async fn spawn_addon_child(binary_path: &str, args: &[String]) -> Result<(), Str
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
-    let mut child = cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("Failed to start binary '{}': {}", binary_path, e))?;
 
     let stdin = child.stdin.take();
@@ -17853,12 +18565,14 @@ async fn spawn_addon_child(binary_path: &str, args: &[String]) -> Result<(), Str
                         // Store in log history
                         if let Ok(mut hist) = ADDON_LOG_HISTORY.lock() {
                             hist.push(format!("[stdout] {}", trimmed));
-                            if hist.len() > 200 { hist.remove(0); }
+                            if hist.len() > 200 {
+                                hist.remove(0);
+                            }
                         }
                         // Emit to frontend
                         if let Ok(h) = GLOBAL_APP_HANDLE.lock() {
                             if let Some(ref handle) = *h {
-                                let _ = handle.emit_all("addon-log", &trimmed);
+                                let _ = handle.emit("addon-log", &trimmed);
                             }
                         }
                     }
@@ -17882,12 +18596,14 @@ async fn spawn_addon_child(binary_path: &str, args: &[String]) -> Result<(), Str
                         // Store in log history
                         if let Ok(mut hist) = ADDON_LOG_HISTORY.lock() {
                             hist.push(format!("[stderr] {}", trimmed));
-                            if hist.len() > 200 { hist.remove(0); }
+                            if hist.len() > 200 {
+                                hist.remove(0);
+                            }
                         }
                         // Emit to frontend
                         if let Ok(h) = GLOBAL_APP_HANDLE.lock() {
                             if let Some(ref handle) = *h {
-                                let _ = handle.emit_all("addon-log", &trimmed);
+                                let _ = handle.emit("addon-log", &trimmed);
                             }
                         }
                     }
@@ -17909,12 +18625,20 @@ async fn start_addon_process(binary_path: &str, args: &[String]) -> Result<(), S
     // Watchdog: restart addon if it dies (only one watchdog thread)
     let bp_owned = binary_path.to_string();
     let args_owned = args.to_vec();
-    let should_spawn_watchdog = ADDON_WATCHDOG_RUNNING.lock().map(|mut guard| {
-        if *guard { false } else { *guard = true; true }
-    }).unwrap_or_else(|e| {
-        eprintln!("[addon] Watchdog lock poisoned: {}", e);
-        true
-    });
+    let should_spawn_watchdog = ADDON_WATCHDOG_RUNNING
+        .lock()
+        .map(|mut guard| {
+            if *guard {
+                false
+            } else {
+                *guard = true;
+                true
+            }
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("[addon] Watchdog lock poisoned: {}", e);
+            true
+        });
     if should_spawn_watchdog {
         // Extract port from args for health checks (args contain "--port", "NNNNN")
         let addon_port: u16 = args_owned.windows(2)
@@ -17934,27 +18658,44 @@ async fn start_addon_process(binary_path: &str, args: &[String]) -> Result<(), S
                     if let Ok(mut proc) = RUNNING_ADDON_PROCESS.lock() {
                         match proc.as_mut().map(|c| c.try_wait()) {
                             Some(Ok(Some(status))) => {
-                                println!("[addon] Process exited with {}, checking server...", status);
+                                println!(
+                                    "[addon] Process exited with {}, checking server...",
+                                    status
+                                );
                                 *proc = None;
                                 true
                             }
                             Some(Ok(None)) => {
                                 // Healthy — reset restart counter
-                                if let Ok(mut cnt) = ADDON_RESTART_COUNT.lock() { *cnt = 0; }
+                                if let Ok(mut cnt) = ADDON_RESTART_COUNT.lock() {
+                                    *cnt = 0;
+                                }
                                 false
                             }
                             Some(Err(e)) => {
                                 // try_wait() error — DO NOT blindly restart.
                                 // Check if the addon server is actually responding via TCP.
-                                println!("[addon] try_wait error: {}, checking if server is alive...", e);
+                                println!(
+                                    "[addon] try_wait error: {}, checking if server is alive...",
+                                    e
+                                );
                                 let addr = format!("127.0.0.1:{}", addon_port);
                                 if std::net::TcpStream::connect_timeout(
-                                    &addr.parse().unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()),
+                                    &addr
+                                        .parse()
+                                        .unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()),
                                     std::time::Duration::from_secs(2),
-                                ).is_ok() {
+                                )
+                                .is_ok()
+                                {
                                     // Server is still responding — don't restart, just reset counter
-                                    println!("[addon] Server is alive on port {}, skipping restart", addon_port);
-                                    if let Ok(mut cnt) = ADDON_RESTART_COUNT.lock() { *cnt = 0; }
+                                    println!(
+                                        "[addon] Server is alive on port {}, skipping restart",
+                                        addon_port
+                                    );
+                                    if let Ok(mut cnt) = ADDON_RESTART_COUNT.lock() {
+                                        *cnt = 0;
+                                    }
                                     false
                                 } else {
                                     println!("[addon] Server not responding, will restart...");
@@ -17965,11 +18706,17 @@ async fn start_addon_process(binary_path: &str, args: &[String]) -> Result<(), S
                                 // No process handle stored
                                 let addr = format!("127.0.0.1:{}", addon_port);
                                 if std::net::TcpStream::connect_timeout(
-                                    &addr.parse().unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()),
+                                    &addr
+                                        .parse()
+                                        .unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()),
                                     std::time::Duration::from_secs(2),
-                                ).is_ok() {
+                                )
+                                .is_ok()
+                                {
                                     println!("[addon] No handle but server alive on port {}, skipping restart", addon_port);
-                                    if let Ok(mut cnt) = ADDON_RESTART_COUNT.lock() { *cnt = 0; }
+                                    if let Ok(mut cnt) = ADDON_RESTART_COUNT.lock() {
+                                        *cnt = 0;
+                                    }
                                     false
                                 } else {
                                     println!("[addon] No process found and server not responding, will restart...");
@@ -17983,7 +18730,9 @@ async fn start_addon_process(binary_path: &str, args: &[String]) -> Result<(), S
                 };
                 if needs_restart {
                     let restart_count = {
-                        let mut cnt = ADDON_RESTART_COUNT.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut cnt = ADDON_RESTART_COUNT
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
                         *cnt += 1;
                         *cnt
                     };
@@ -17991,8 +18740,8 @@ async fn start_addon_process(binary_path: &str, args: &[String]) -> Result<(), S
                         println!("[addon] Max restarts ({}) exceeded. Giving up. Restart the app to retry.", MAX_RESTARTS);
                         if let Ok(h) = GLOBAL_APP_HANDLE.lock() {
                             if let Some(ref handle) = *h {
-                                let _ = handle.emit_all("addon-log", &"[FATAL] Addon crashed too many times. Please restart the app.");
-                                let _ = handle.emit_all("addon-crashed", &restart_count);
+                                let _ = handle.emit("addon-log", &"[FATAL] Addon crashed too many times. Please restart the app.");
+                                let _ = handle.emit("addon-crashed", &restart_count);
                             }
                         }
                         break;
@@ -18005,7 +18754,10 @@ async fn start_addon_process(binary_path: &str, args: &[String]) -> Result<(), S
                     }
                     // Exponential backoff: 2s, 4s, 8s, 16s, ... capped at 60s
                     let delay = std::cmp::min(BACKOFF_BASE.pow(restart_count), 60);
-                    println!("[addon] Restart attempt {}/{} in {}s...", restart_count, MAX_RESTARTS, delay);
+                    println!(
+                        "[addon] Restart attempt {}/{} in {}s...",
+                        restart_count, MAX_RESTARTS, delay
+                    );
                     std::thread::sleep(std::time::Duration::from_secs(delay));
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     match rt.block_on(spawn_addon_child(&bp_owned, &args_owned)) {
@@ -18020,13 +18772,11 @@ async fn start_addon_process(binary_path: &str, args: &[String]) -> Result<(), S
     Ok(())
 }
 
-
 #[tauri::command]
 fn remote_clear_streams_cache() -> Result<(), String> {
     // No-op: stream cache removed — addon handles caching now
     Ok(())
 }
-
 
 #[tauri::command]
 async fn run_sync_validation(
@@ -18034,8 +18784,9 @@ async fn run_sync_validation(
     state: tauri::State<'_, AppState>,
 ) -> Result<database::SyncValidationReport, String> {
     // Acquire scan lock — validation cannot run during a scan
-    let _lock = crate::ScanLock::try_acquire(&state.is_scanning)
-        .ok_or_else(|| "Cannot validate during an active scan. Wait for scan to complete.".to_string())?;
+    let _lock = crate::ScanLock::try_acquire(&state.is_scanning).ok_or_else(|| {
+        "Cannot validate during an active scan. Wait for scan to complete.".to_string()
+    })?;
 
     let total_steps: u8 = 5;
     let mut report = database::SyncValidationReport {
@@ -18048,9 +18799,12 @@ async fn run_sync_validation(
     };
 
     // --- Check 1: Ghost entries ---
-    let _ = app.emit_all("sync-validation-progress", serde_json::json!({
-        "step": 1, "total": total_steps, "category": "ghost", "status": "checking"
-    }));
+    let _ = app.emit(
+        "sync-validation-progress",
+        serde_json::json!({
+            "step": 1, "total": total_steps, "category": "ghost", "status": "checking"
+        }),
+    );
 
     let ghost_result = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
@@ -18087,22 +18841,29 @@ async fn run_sync_validation(
         }
     }
 
-    let _ = app.emit_all("sync-validation-result", serde_json::json!({
-        "category": "ghost",
-        "issues": report.ghost_entries,
-        "count": report.ghost_entries.len()
-    }));
+    let _ = app.emit(
+        "sync-validation-result",
+        serde_json::json!({
+            "category": "ghost",
+            "issues": report.ghost_entries,
+            "count": report.ghost_entries.len()
+        }),
+    );
 
     // --- Check 2: Missing files ---
-    let _ = app.emit_all("sync-validation-progress", serde_json::json!({
-        "step": 2, "total": total_steps, "category": "missing", "status": "checking"
-    }));
+    let _ = app.emit(
+        "sync-validation-progress",
+        serde_json::json!({
+            "step": 2, "total": total_steps, "category": "missing", "status": "checking"
+        }),
+    );
 
     let (folders, existing_ids) = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         let folders = db.get_cloud_folders().map_err(|e| e.to_string())?;
         let cloud_ids = db.get_all_cloud_media_ids().map_err(|e| e.to_string())?;
-        let ids: std::collections::HashSet<String> = cloud_ids.into_iter().map(|(fid, _, _)| fid).collect();
+        let ids: std::collections::HashSet<String> =
+            cloud_ids.into_iter().map(|(fid, _, _)| fid).collect();
         (folders, ids)
     };
 
@@ -18135,20 +18896,28 @@ async fn run_sync_validation(
         }
     }
 
-    let _ = app.emit_all("sync-validation-result", serde_json::json!({
-        "category": "missing",
-        "issues": report.missing_files,
-        "count": report.missing_files.len()
-    }));
+    let _ = app.emit(
+        "sync-validation-result",
+        serde_json::json!({
+            "category": "missing",
+            "issues": report.missing_files,
+            "count": report.missing_files.len()
+        }),
+    );
 
     // --- Check 3: Failed indexings ---
-    let _ = app.emit_all("sync-validation-progress", serde_json::json!({
-        "step": 3, "total": total_steps, "category": "failed", "status": "checking"
-    }));
+    let _ = app.emit(
+        "sync-validation-progress",
+        serde_json::json!({
+            "step": 3, "total": total_steps, "category": "failed", "status": "checking"
+        }),
+    );
 
     {
         let db = state.db.lock().map_err(|e| e.to_string())?;
-        let failures = db.get_cloud_index_failures(1000).map_err(|e| e.to_string())?;
+        let failures = db
+            .get_cloud_index_failures(1000)
+            .map_err(|e| e.to_string())?;
         for f in failures {
             report.failed_indexings.push(database::SyncIssue {
                 category: "failed".to_string(),
@@ -18161,16 +18930,22 @@ async fn run_sync_validation(
         }
     }
 
-    let _ = app.emit_all("sync-validation-result", serde_json::json!({
-        "category": "failed",
-        "issues": report.failed_indexings,
-        "count": report.failed_indexings.len()
-    }));
+    let _ = app.emit(
+        "sync-validation-result",
+        serde_json::json!({
+            "category": "failed",
+            "issues": report.failed_indexings,
+            "count": report.failed_indexings.len()
+        }),
+    );
 
     // --- Check 4: Orphaned ZIP entries ---
-    let _ = app.emit_all("sync-validation-progress", serde_json::json!({
-        "step": 4, "total": total_steps, "category": "orphaned_zip", "status": "checking"
-    }));
+    let _ = app.emit(
+        "sync-validation-progress",
+        serde_json::json!({
+            "step": 4, "total": total_steps, "category": "orphaned_zip", "status": "checking"
+        }),
+    );
 
     {
         let db = state.db.lock().map_err(|e| e.to_string())?;
@@ -18187,16 +18962,22 @@ async fn run_sync_validation(
         }
     }
 
-    let _ = app.emit_all("sync-validation-result", serde_json::json!({
-        "category": "orphaned_zip",
-        "issues": report.orphaned_zip_entries,
-        "count": report.orphaned_zip_entries.len()
-    }));
+    let _ = app.emit(
+        "sync-validation-result",
+        serde_json::json!({
+            "category": "orphaned_zip",
+            "issues": report.orphaned_zip_entries,
+            "count": report.orphaned_zip_entries.len()
+        }),
+    );
 
     // --- Check 5: Stale changes token ---
-    let _ = app.emit_all("sync-validation-progress", serde_json::json!({
-        "step": 5, "total": total_steps, "category": "stale_token", "status": "checking"
-    }));
+    let _ = app.emit(
+        "sync-validation-progress",
+        serde_json::json!({
+            "step": 5, "total": total_steps, "category": "stale_token", "status": "checking"
+        }),
+    );
 
     {
         let db = state.db.lock().map_err(|e| e.to_string())?;
@@ -18213,11 +18994,14 @@ async fn run_sync_validation(
         }
     }
 
-    let _ = app.emit_all("sync-validation-result", serde_json::json!({
-        "category": "stale_token",
-        "issues": report.stale_token,
-        "count": report.stale_token.len()
-    }));
+    let _ = app.emit(
+        "sync-validation-result",
+        serde_json::json!({
+            "category": "stale_token",
+            "issues": report.stale_token,
+            "count": report.stale_token.len()
+        }),
+    );
 
     // --- Complete ---
     report.total_issues = report.ghost_entries.len()
@@ -18226,10 +19010,13 @@ async fn run_sync_validation(
         + report.orphaned_zip_entries.len()
         + report.stale_token.len();
 
-    let _ = app.emit_all("sync-validation-complete", serde_json::json!({
-        "total_issues": report.total_issues,
-        "report": report
-    }));
+    let _ = app.emit(
+        "sync-validation-complete",
+        serde_json::json!({
+            "total_issues": report.total_issues,
+            "report": report
+        }),
+    );
 
     // Store in AppState for fix_sync_issues to reference
     if let Ok(mut last_report) = state.last_validation_report.lock() {
@@ -18248,16 +19035,61 @@ async fn fix_sync_issues(
 ) -> Result<serde_json::Value, String> {
     // Validate that we have a recent report — clone to release the lock
     let report = {
-        let guard = state.last_validation_report.lock().map_err(|e| e.to_string())?;
-        guard.clone().ok_or("No validation report available. Run sync validation first.")?
+        let guard = state
+            .last_validation_report
+            .lock()
+            .map_err(|e| e.to_string())?;
+        guard
+            .clone()
+            .ok_or("No validation report available. Run sync validation first.")?
     };
 
     // Get the issues for this category to verify file_ids are valid
     let issues: Vec<database::SyncIssue> = match category.as_str() {
-        "ghost" => report.ghost_entries.iter().filter(|i| i.file_id.as_deref().map(|fid| file_ids.contains(&fid.to_string())).unwrap_or(false)).cloned().collect(),
-        "missing" => report.missing_files.iter().filter(|i| i.file_id.as_deref().map(|fid| file_ids.contains(&fid.to_string())).unwrap_or(false)).cloned().collect(),
-        "failed" => report.failed_indexings.iter().filter(|i| i.file_id.as_deref().map(|fid| file_ids.contains(&fid.to_string())).unwrap_or(false)).cloned().collect(),
-        "orphaned_zip" => report.orphaned_zip_entries.iter().filter(|i| i.file_id.as_deref().map(|fid| file_ids.contains(&fid.to_string())).unwrap_or(false)).cloned().collect(),
+        "ghost" => report
+            .ghost_entries
+            .iter()
+            .filter(|i| {
+                i.file_id
+                    .as_deref()
+                    .map(|fid| file_ids.contains(&fid.to_string()))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect(),
+        "missing" => report
+            .missing_files
+            .iter()
+            .filter(|i| {
+                i.file_id
+                    .as_deref()
+                    .map(|fid| file_ids.contains(&fid.to_string()))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect(),
+        "failed" => report
+            .failed_indexings
+            .iter()
+            .filter(|i| {
+                i.file_id
+                    .as_deref()
+                    .map(|fid| file_ids.contains(&fid.to_string()))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect(),
+        "orphaned_zip" => report
+            .orphaned_zip_entries
+            .iter()
+            .filter(|i| {
+                i.file_id
+                    .as_deref()
+                    .map(|fid| file_ids.contains(&fid.to_string()))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect(),
         "stale_token" => report.stale_token.clone(),
         _ => return Err(format!("Unknown category: {}", category)),
     };
@@ -18267,11 +19099,14 @@ async fn fix_sync_issues(
     let mut failed: usize = 0;
 
     for issue in &issues {
-        let _ = app.emit_all("sync-fix-progress", serde_json::json!({
-            "category": category,
-            "current": fixed + failed + 1,
-            "total": total
-        }));
+        let _ = app.emit(
+            "sync-fix-progress",
+            serde_json::json!({
+                "category": category,
+                "current": fixed + failed + 1,
+                "total": total
+            }),
+        );
 
         match category.as_str() {
             "ghost" | "orphaned_zip" => {
@@ -18287,7 +19122,9 @@ async fn fix_sync_issues(
                         // For ghosts, file_id is cloud_file_id string — preserve progress then delete
                         let db = state.db.lock().map_err(|e| e.to_string())?;
                         // Preserve watch progress for any media with this cloud_file_id
-                        if let Ok(Some((media_id, _, _, _))) = db.get_media_info_by_cloud_file_id(id_str) {
+                        if let Ok(Some((media_id, _, _, _))) =
+                            db.get_media_info_by_cloud_file_id(id_str)
+                        {
                             let _ = db.preserve_watch_progress_for_media(media_id);
                         }
                         // Also preserve for ZIP children (parent_zip_id = cloud_file_id)
@@ -18324,11 +19161,14 @@ async fn fix_sync_issues(
         }
     }
 
-    let _ = app.emit_all("sync-fix-result", serde_json::json!({
-        "category": category,
-        "fixed": fixed,
-        "failed": failed
-    }));
+    let _ = app.emit(
+        "sync-fix-result",
+        serde_json::json!({
+            "category": category,
+            "fixed": fixed,
+            "failed": failed
+        }),
+    );
 
     Ok(serde_json::json!({
         "category": category,
@@ -18338,53 +19178,51 @@ async fn fix_sync_issues(
     }))
 }
 
-#[tauri::command]
-fn refresh_tray_continue_watching(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let show = CustomMenuItem::new("show".to_string(), "Show SlasshyVault");
-    let quit = CustomMenuItem::new("quit".to_string(), "Quit");
-    let mut tray_menu = SystemTrayMenu::new()
-        .add_item(show)
-        .add_native_item(SystemTrayMenuItem::Separator);
-
+fn build_tray_menu<R: tauri::Runtime>(app: &AppHandle<R>, state: &AppState) -> Result<Menu<R>, tauri::Error> {
     let continue_items = {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
-        db.get_continue_watching_items(3).unwrap_or_default()
+        let db_guard = state.db.lock().map_err(|e| tauri::Error::Anyhow(std::io::Error::other(e.to_string()).into()))?;
+        db_guard.get_continue_watching_items(3).unwrap_or_default()
     };
-    if !continue_items.is_empty() {
-        for item in &continue_items {
-            let label = if item.media_type == "tvepisode" {
-                let sn = item.season_number.unwrap_or(0);
-                let en = item.episode_number.unwrap_or(0);
-                let ep_title = item.episode_title.as_deref().unwrap_or("");
-                let display = if ep_title.is_empty() {
-                    format!("{} S{:02}E{:02}", item.title, sn, en)
-                } else {
-                    format!("{} S{:02}E{:02} - {}", item.title, sn, en, ep_title)
-                };
-                if display.len() > 45 {
-                    format!("{}...", &display[..42])
-                } else {
-                    display
-                }
-            } else {
-                if item.title.len() > 45 {
-                    format!("{}...", &item.title[..42])
-                } else {
-                    item.title.clone()
-                }
-            };
-            let menu_item = CustomMenuItem::new(
-                format!("continue_{}", item.id),
-                format!("▶ {}", label),
-            );
-            tray_menu = tray_menu.add_item(menu_item);
-        }
-        tray_menu = tray_menu.add_native_item(SystemTrayMenuItem::Separator);
-    }
-    tray_menu = tray_menu.add_item(quit);
 
-    app.tray_handle().set_menu(tray_menu).map_err(|e| e.to_string())?;
-    Ok(())
+    let mut menu = MenuBuilder::new(app)
+        .text("show", "Show SlasshyVault")
+        .separator();
+
+    for item in continue_items {
+        let label = if item.media_type == "tvepisode" {
+            let season = item.season_number.unwrap_or(0);
+            let episode = item.episode_number.unwrap_or(0);
+            let episode_title = item.episode_title.as_deref().unwrap_or("");
+            if episode_title.is_empty() {
+                format!("{} S{:02}E{:02}", item.title, season, episode)
+            } else {
+                format!("{} S{:02}E{:02} - {}", item.title, season, episode, episode_title)
+            }
+        } else {
+            item.title.clone()
+        };
+        let label = if label.len() > 45 {
+            format!("{}...", &label[..42])
+        } else {
+            label
+        };
+        menu = menu.text(format!("continue_{}", item.id), format!("▶ {}", label));
+    }
+
+    menu = menu.separator().text("quit", "Quit");
+    menu.build()
+}
+
+#[tauri::command]
+fn refresh_tray_continue_watching(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let menu = build_tray_menu(&app, &state).map_err(|e| e.to_string())?;
+    let tray = app
+        .tray_by_id("main")
+        .ok_or_else(|| "Tray icon not found".to_string())?;
+    tray.set_menu(Some(menu)).map_err(|e| e.to_string())
 }
 
 // ==================== SUBTITLE MANAGEMENT ====================
@@ -18397,7 +19235,10 @@ struct SubtitleEntry {
 }
 
 #[tauri::command]
-async fn fetch_subtitles(imdb_id: String, media_type: String) -> Result<Vec<SubtitleEntry>, String> {
+async fn fetch_subtitles(
+    imdb_id: String,
+    media_type: String,
+) -> Result<Vec<SubtitleEntry>, String> {
     let type_str = match media_type.as_str() {
         "movie" => "movie",
         "tvshow" | "tvepisode" => "series",
@@ -18418,7 +19259,10 @@ async fn fetch_subtitles(imdb_id: String, media_type: String) -> Result<Vec<Subt
             .map_err(|e| format!("Failed to fetch subtitles: {}", e))?;
 
         if !response.status().is_success() {
-            return Err(format!("Subtitle API returned status {}", response.status()));
+            return Err(format!(
+                "Subtitle API returned status {}",
+                response.status()
+            ));
         }
 
         let body: serde_json::Value = response
@@ -18463,7 +19307,10 @@ async fn download_subtitle(url: String, filename: String) -> Result<String, Stri
             .map_err(|e| format!("Failed to download subtitle: {}", e))?;
 
         if !response.status().is_success() {
-            return Err(format!("Subtitle download returned status {}", response.status()));
+            return Err(format!(
+                "Subtitle download returned status {}",
+                response.status()
+            ));
         }
 
         let bytes = response
@@ -18498,7 +19345,7 @@ async fn download_subtitle(url: String, filename: String) -> Result<String, Stri
 }
 
 fn main() {
-    // Set Windows AppUserModelID so the volume mixer shows "SlasshyVault" instead of "WebView2".
+    // Set WebviewWindows AppUserModelID so the volume mixer shows "SlasshyVault" instead of "WebView2".
     #[cfg(windows)]
     {
         use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
@@ -18533,9 +19380,7 @@ fn main() {
     // Release builds use StreamVault → SlasshyVault (production data migration).
     migrate_app_data();
 
-    // Prepare deep link before building the app.
-    // Dev and production use separate identifiers/schemes so they can run independently.
-    tauri_plugin_deep_link::prepare(runtime_app_identifier());
+    // Deep-link handling is registered by the v2 plugin and consumed below.
 
     // Initialize paths
     let db_path = database::get_database_path();
@@ -18617,87 +19462,48 @@ fn main() {
         gdrive_refresh_watchdog: Arc::new(Mutex::new(None)),
     };
 
-    // Create system tray menu with continue-watching items
-    let show = CustomMenuItem::new("show".to_string(), "Show SlasshyVault");
-    let quit = CustomMenuItem::new("quit".to_string(), "Quit");
-    let mut tray_menu = SystemTrayMenu::new()
-        .add_item(show)
-        .add_native_item(SystemTrayMenuItem::Separator);
-
-    // Add continue-watching items from database
-    let continue_items = {
-        let db_guard = state.db.lock().unwrap();
-        db_guard.get_continue_watching_items(3).unwrap_or_default()
-    };
-    if !continue_items.is_empty() {
-        for item in &continue_items {
-            let label = if item.media_type == "tvepisode" {
-                let sn = item.season_number.unwrap_or(0);
-                let en = item.episode_number.unwrap_or(0);
-                let ep_title = item.episode_title.as_deref().unwrap_or("");
-                let display = if ep_title.is_empty() {
-                    format!("{} S{:02}E{:02}", item.title, sn, en)
-                } else {
-                    format!("{} S{:02}E{:02} - {}", item.title, sn, en, ep_title)
-                };
-                if display.len() > 45 {
-                    format!("{}...", &display[..42])
-                } else {
-                    display
-                }
-            } else {
-                if item.title.len() > 45 {
-                    format!("{}...", &item.title[..42])
-                } else {
-                    item.title.clone()
-                }
-            };
-            let menu_item = CustomMenuItem::new(
-                format!("continue_{}", item.id),
-                format!("▶ {}", label),
-            );
-            tray_menu = tray_menu.add_item(menu_item);
-        }
-        tray_menu = tray_menu.add_native_item(SystemTrayMenuItem::Separator);
-    }
-    tray_menu = tray_menu.add_item(quit);
-
-    let system_tray = SystemTray::new().with_menu(tray_menu);
-
-    let builder = tauri::Builder::default();
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_http::init())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_deep_link::init());
     let builder = if let Some(plugin) = single_instance_plugin {
         builder.plugin(plugin)
     } else {
         builder
     };
     builder
-        .system_tray(system_tray)
-        .on_system_tray_event(|app, event| {
-            match event {
-                SystemTrayEvent::LeftClick { .. } => {
-                    restore_or_create_main_window(app);
-                }
-                SystemTrayEvent::MenuItemClick { id, .. } => {
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec!["--flag1", "--flag2"]),
+        ))
+        .manage(state)
+        .setup(move |app| {
+            let state = app.state::<AppState>();
+            let tray_menu = build_tray_menu(app.handle(), &state)?;
+            TrayIconBuilder::with_id("main")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| {
+                    let id = event.id().as_ref();
                     if id == "show" {
-                        restore_or_create_main_window(app);
+                        restore_or_create_main_window(&app.clone());
                     } else if id == "quit" {
                         std::process::exit(0);
                     } else if let Some(media_id_str) = id.strip_prefix("continue_") {
                         if let Ok(media_id) = media_id_str.parse::<i64>() {
-                            restore_or_create_main_window(app);
-                            let _ = app.emit_all("play-continue-watching", serde_json::json!({
+                            restore_or_create_main_window(&app.clone());
+                            let _ = app.emit("play-continue-watching", serde_json::json!({
                                 "media_id": media_id,
                             }));
                         }
                     }
-                }
-                _ => {}
-            }
-        })
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--flag1", "--flag2"])))
-        .manage(state)
-        .setup(move |app| {
-            if let Some(window) = app.get_window("main") {
+                })
+                .build(app)?;
+
+            if let Some(window) = app.get_webview_window("main") {
                 window.set_title(runtime_window_title()).ok();
                 apply_window_corner_radius(&window);
             }
@@ -18726,33 +19532,23 @@ fn main() {
 
             // Store global app handle for background thread event emission
             if let Ok(mut h) = GLOBAL_APP_HANDLE.lock() {
-                *h = Some(app.handle());
+                *h = Some(app.handle().clone());
             }
 
-            // Register deep link handler for OAuth callback
-            // The callback page redirects to the runtime-specific scheme.
-            let handle = app.handle();
-            tauri_plugin_deep_link::register(runtime_deep_link_scheme(), move |request| {
-                println!("[DEEPLINK] Received: {}", request);
-
-                // Parse the deep link URL and extract the OAuth code.
-                if let Ok(url) = url::Url::parse(&request) {
-                    // Look for the authorization code
-                    if let Some(code) = url.query_pairs().find(|(k, _)| k == "code").map(|(_, v)| v.to_string()) {
-                        println!("[DEEPLINK] Extracted OAuth code");
-
-                        // Send the code through the channel
+            // Register deep-link handler for OAuth callback.
+            let handle = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                for url in event.urls() {
+                    let request = url.to_string();
+                    println!("[DEEPLINK] Received: {}", request);
+                    if let Some(code) = url.query_pairs().find(|(key, _)| key == "code").map(|(_, value)| value.to_string()) {
                         if let Ok(tx) = OAUTH_CODE_CHANNEL.0.lock() {
-                            if let Err(e) = tx.send(code) {
-                                println!("[DEEPLINK] Failed to send code: {}", e);
-                            }
+                            let _ = tx.send(code);
                         }
-
-                        // Bring the app to front
                         restore_or_create_main_window(&handle);
                     }
                 }
-            }).ok();
+            });
 
             // Merge any duplicate TV shows on startup
             println!("[STARTUP] Running duplicate TV show merge...");
@@ -18850,28 +19646,28 @@ fn main() {
             }
 
             // Start background cloud polling (runs independently of window)
-            let app_handle_for_polling = app.handle();
+            let app_handle_for_polling = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 background_cloud_poll(app_handle_for_polling).await;
             });
 
             // One-time metadata enrichment pass for existing libraries.
-            let app_handle_for_metadata_enrichment = app.handle();
+            let app_handle_for_metadata_enrichment = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 run_startup_metadata_enrichment(app_handle_for_metadata_enrichment).await;
             });
 
-            let app_handle_for_reminders = app.handle();
+            let app_handle_for_reminders = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 run_movie_reminder_scheduler(app_handle_for_reminders).await;
             });
 
-            let app_handle_for_watchlist = app.handle();
+            let app_handle_for_watchlist = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 run_watchlist_scheduler(app_handle_for_watchlist).await;
             });
 
-            let app_handle_for_watchlist_sync = app.handle();
+            let app_handle_for_watchlist_sync = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = app_handle_for_watchlist_sync.state::<AppState>();
                 match sync_watchlist_to_drive(&state).await {
@@ -18881,7 +19677,7 @@ fn main() {
                                 "[WATCHLIST] Startup sync complete: merged_remote_items={}, uploaded_items={}",
                                 status.merged_remote_items, status.uploaded_items
                             );
-                            let _ = app_handle_for_watchlist_sync.emit_all("refresh-watchlist", ());
+                            let _ = app_handle_for_watchlist_sync.emit("refresh-watchlist", ());
                         } else if let Some(reason) = status.skipped_reason {
                             println!("[WATCHLIST] Startup sync skipped: {}", reason);
                         }
@@ -18962,17 +19758,16 @@ fn main() {
 
             let _ = window.emit("inject-script", popup_block_script);
         })
-        .on_window_event(|event| {
-            match event.event() {
-                tauri::WindowEvent::CloseRequested { .. } => {
+        .on_window_event(|window, event| {
+            match event {
+                WindowEvent::CloseRequested { .. } => {
                     // Let the window close/destroy completely to free RAM
                     // Don't prevent close - we handle app exit separately in .run()
-                    println!("[TRAY] Window closing/destroying. Backend will keep running.");
+                    println!("[TRAY] WebviewWindow closing/destroying. Backend will keep running.");
                 }
-                tauri::WindowEvent::Focused(focused) => {
+                WindowEvent::Focused(focused) => {
                     if *focused {
                         // Re-inject popup blocker when window regains focus
-                        let window = event.window();
                         let _ = window.emit("inject-script", r#"
                             if (!window.__adBlockerActive) {
                                 window.__adBlockerActive = true;

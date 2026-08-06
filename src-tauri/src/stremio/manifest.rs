@@ -82,7 +82,9 @@ pub fn normalize_url(input: &str) -> Result<String, ManifestError> {
     let parsed = url::Url::parse(&s)
         .map_err(|e| ManifestError::Unreachable(format!("invalid URL: {}", e)))?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return Err(ManifestError::UnsupportedScheme(parsed.scheme().to_string()));
+        return Err(ManifestError::UnsupportedScheme(
+            parsed.scheme().to_string(),
+        ));
     }
     let mut s = parsed.to_string();
     // Trim trailing slash and ensure /manifest.json suffix.
@@ -237,8 +239,8 @@ fn try_fetch_manifest(
         ));
     }
 
-    let raw: RawManifest = serde_json::from_str(&body)
-        .map_err(|e| ManifestError::InvalidJson(e.to_string()))?;
+    let raw: RawManifest =
+        serde_json::from_str(&body).map_err(|e| ManifestError::InvalidJson(e.to_string()))?;
     let mut parsed = parse(raw)?;
     parsed.addon.url = url.to_string();
     Ok(parsed)
@@ -317,6 +319,9 @@ mod tests {
             "id": "x", "version": "1.0.0", "name": "", "resources": ["stream"]
         }))
         .unwrap();
-        assert!(matches!(parse(raw), Err(ManifestError::MissingField("name"))));
+        assert!(matches!(
+            parse(raw),
+            Err(ManifestError::MissingField("name"))
+        ));
     }
 }

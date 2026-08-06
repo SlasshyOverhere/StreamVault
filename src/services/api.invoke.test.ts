@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // Mock Tauri invoke + convertFileSrc
 const mockInvoke = vi.fn()
-vi.mock('@tauri-apps/api/tauri', () => ({
+vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),
   convertFileSrc: vi.fn((p: string) => `asset://${p}`),
 }))

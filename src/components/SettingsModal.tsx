@@ -55,8 +55,8 @@ import {
 } from "@/services/api";
 
 import { useToast } from "@/components/ui/use-toast";
-import { open as openDialog } from "@tauri-apps/api/dialog";
-import { invoke } from "@tauri-apps/api/tauri";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { Switch } from "@/components/ui/switch";
 import { LazyMotion, domAnimation, m, AnimatePresence } from "framer-motion";
@@ -418,6 +418,7 @@ export function SettingsModal({
     return localStorage.getItem("slasshyvault_show_dev_console") === "true";
   });
   const { toast } = useToast();
+  const isWindows = /windows/i.test(navigator.userAgent);
 
   const validatePath = useCallback((path: string, label: string) => {
     if (!path) {
@@ -686,7 +687,7 @@ export function SettingsModal({
     try {
       const selected = await openDialog({
         multiple: false,
-        filters: [{ name: "Executable", extensions: ["exe"] }],
+        ...(isWindows ? { filters: [{ name: "Executable", extensions: ["exe"] }] } : {}),
         title: "Select MPV Executable",
       });
       if (selected && typeof selected === "string") {
@@ -774,7 +775,7 @@ export function SettingsModal({
         toast({
           title: "MPV Not Found",
           description:
-            "Could not find mpv.exe on your system. Please install MPV or set the path manually.",
+            "Could not find mpv on your system. Please install MPV or set the path manually.",
           variant: "destructive",
         });
       }
@@ -893,7 +894,7 @@ export function SettingsModal({
                               MPV Player
                             </Label>
                             <p className="text-sm text-muted-foreground">
-                              External mpv.exe player (default)
+                              External MPV player (default)
                             </p>
                           </div>
                         </div>
@@ -933,7 +934,9 @@ export function SettingsModal({
                                   )}>
                                     {bundledMpvInfo?.exists
                                       ? "✓ Installed and ready to use"
-                                      : "Not installed — click to set up"}
+                                      : isWindows
+                                        ? "Not installed — click to set up"
+                                        : "Install MPV with your Linux package manager"}
                                   </p>
                                 </div>
                               </div>
@@ -941,7 +944,7 @@ export function SettingsModal({
                                 variant={bundledMpvInfo?.exists ? "ghost" : "default"}
                                 size="sm"
                                 onClick={handleDownloadBundledMpv}
-                                disabled={downloadingBundledMpv}
+                                disabled={downloadingBundledMpv || !isWindows}
                                 className={cn(
                                   "gap-1.5 text-xs h-8 shrink-0",
                                   bundledMpvInfo?.exists && "text-muted-foreground hover:text-foreground"
@@ -957,7 +960,7 @@ export function SettingsModal({
                                 ) : bundledMpvInfo?.exists ? (
                                   "Reinstall"
                                 ) : (
-                                  "Install"
+                                  isWindows ? "Install" : "System MPV"
                                 )}
                               </Button>
                             </div>
@@ -1008,7 +1011,7 @@ export function SettingsModal({
                                       setConfig({ ...config, mpv_path: e.target.value });
                                       validatePath(e.target.value, "mpv_path");
                                     }}
-                                    placeholder="C:\path\to\mpv.exe"
+                                    placeholder={isWindows ? "C:\\path\\to\\mpv.exe" : "/usr/bin/mpv"}
                                     className="flex-1 text-xs"
                                     aria-label="Custom MPV executable path"
                                     aria-invalid={!!pathValidation.mpv_path}

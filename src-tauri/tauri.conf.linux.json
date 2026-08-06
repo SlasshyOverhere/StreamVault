@@ -1,0 +1,10 @@
+{
+  "bundle": {
+    "targets": ["deb", "appimage"]
+  },
+  "app": {
+    "trayIcon": {
+      "iconPath": "icons/slasshyvault.png"
+    }
+  }
+}

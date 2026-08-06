@@ -12,8 +12,8 @@ use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 static CACHE_POLICY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -702,7 +702,12 @@ fn fetch_range(
         {
             Ok(resp) => resp,
             Err(e) => {
-                last_error = format!("HTTP request failed (attempt {}/{}): {}", attempt + 1, max_retries, e);
+                last_error = format!(
+                    "HTTP request failed (attempt {}/{}): {}",
+                    attempt + 1,
+                    max_retries,
+                    e
+                );
                 std::thread::sleep(std::time::Duration::from_secs(2u64.pow(attempt as u32)));
                 continue;
             }
@@ -712,12 +717,19 @@ fn fetch_range(
 
         // Retry on 429 (rate limit) and 5xx (server errors)
         if status.as_u16() == 429 || status.is_server_error() {
-            let retry_after = response.headers()
+            let retry_after = response
+                .headers()
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(2u64.pow(attempt as u32));
-            last_error = format!("HTTP {} on range fetch (attempt {}/{}), retrying in {}s", status, attempt + 1, max_retries, retry_after);
+            last_error = format!(
+                "HTTP {} on range fetch (attempt {}/{}), retrying in {}s",
+                status,
+                attempt + 1,
+                max_retries,
+                retry_after
+            );
             println!("[ZIP] {}", last_error);
             std::thread::sleep(std::time::Duration::from_secs(retry_after));
             continue;
@@ -727,14 +739,16 @@ fn fetch_range(
             let body = response.text().unwrap_or_default();
             return Err(ZipError::HttpStatus {
                 status: status.as_u16(),
-                message: format!("Range fetch (bytes={}-{}) returned {}: {}", start, end, status, body),
+                message: format!(
+                    "Range fetch (bytes={}-{}) returned {}: {}",
+                    start, end, status, body
+                ),
             });
         }
 
-        return response
-            .bytes()
-            .map(|bytes| bytes.to_vec())
-            .map_err(|e| ZipError::HttpRequestError(format!("Failed to read range response body: {}", e)));
+        return response.bytes().map(|bytes| bytes.to_vec()).map_err(|e| {
+            ZipError::HttpRequestError(format!("Failed to read range response body: {}", e))
+        });
     }
 
     Err(ZipError::HttpRequestError(format!(
@@ -955,7 +969,13 @@ where
         BufWriter::new(File::create(output_path).map_err(|_| ZipError::CorruptedArchive)?);
     let mut crc = Crc32Hasher::new();
     let bytes_written = match compression_method {
-        0 => copy_and_hash_with_progress(response, &mut writer, &mut crc, expected_size, on_progress)?,
+        0 => copy_and_hash_with_progress(
+            response,
+            &mut writer,
+            &mut crc,
+            expected_size,
+            on_progress,
+        )?,
         8 => copy_and_hash_with_progress(
             DeflateDecoder::new(response),
             &mut writer,
@@ -1033,7 +1053,9 @@ fn enforce_cache_policy(cache_config: &ZipCacheConfig, reserve_bytes: u64) -> Re
     }
 
     entries = collect_cache_entries(&cache_dir)?;
-    let mut total_size: u64 = entries.iter().fold(0u64, |acc, e| acc.saturating_add(e.size_bytes));
+    let mut total_size: u64 = entries
+        .iter()
+        .fold(0u64, |acc, e| acc.saturating_add(e.size_bytes));
     let target_limit = cache_config.max_size_bytes.max(reserve_bytes);
 
     if total_size.saturating_add(reserve_bytes) <= target_limit {
@@ -1368,25 +1390,37 @@ mod tests {
     #[test]
     fn compression_type_all_store() {
         let entries = vec![make_entry("a.mkv", 0, false), make_entry("b.mkv", 0, false)];
-        assert_eq!(check_zip_compression_type(&entries), ZipCompressionType::Store);
+        assert_eq!(
+            check_zip_compression_type(&entries),
+            ZipCompressionType::Store
+        );
     }
 
     #[test]
     fn compression_type_all_deflate() {
         let entries = vec![make_entry("a.mkv", 8, false), make_entry("b.mkv", 8, false)];
-        assert_eq!(check_zip_compression_type(&entries), ZipCompressionType::Deflate);
+        assert_eq!(
+            check_zip_compression_type(&entries),
+            ZipCompressionType::Deflate
+        );
     }
 
     #[test]
     fn compression_type_mixed() {
         let entries = vec![make_entry("a.mkv", 0, false), make_entry("b.mkv", 8, false)];
-        assert_eq!(check_zip_compression_type(&entries), ZipCompressionType::Mixed);
+        assert_eq!(
+            check_zip_compression_type(&entries),
+            ZipCompressionType::Mixed
+        );
     }
 
     #[test]
     fn compression_type_other_method() {
         let entries = vec![make_entry("a.mkv", 14, false)];
-        assert_eq!(check_zip_compression_type(&entries), ZipCompressionType::Other);
+        assert_eq!(
+            check_zip_compression_type(&entries),
+            ZipCompressionType::Other
+        );
     }
 
     #[test]
@@ -1395,13 +1429,19 @@ mod tests {
             make_entry("dir/", 0, true),
             make_entry("file.mkv", 8, false),
         ];
-        assert_eq!(check_zip_compression_type(&entries), ZipCompressionType::Deflate);
+        assert_eq!(
+            check_zip_compression_type(&entries),
+            ZipCompressionType::Deflate
+        );
     }
 
     #[test]
     fn compression_type_empty_entries() {
         let entries: Vec<ZipEntry> = vec![];
-        assert_eq!(check_zip_compression_type(&entries), ZipCompressionType::Store);
+        assert_eq!(
+            check_zip_compression_type(&entries),
+            ZipCompressionType::Store
+        );
     }
 
     // ── to_analysis_result ────────────────────────────────────────────────
@@ -1534,28 +1574,40 @@ mod tests {
         let mut media = make_media();
         media.zip_compression_method = Some(14);
         let result = build_zip_stream_info(&media);
-        assert!(matches!(result, Err(ZipError::UnsupportedCompressionMethod(14))));
+        assert!(matches!(
+            result,
+            Err(ZipError::UnsupportedCompressionMethod(14))
+        ));
     }
 
     #[test]
     fn stream_info_no_zip_id_errors() {
         let mut media = make_media();
         media.parent_zip_id = None;
-        assert!(matches!(build_zip_stream_info(&media), Err(ZipError::NotAValidZip)));
+        assert!(matches!(
+            build_zip_stream_info(&media),
+            Err(ZipError::NotAValidZip)
+        ));
     }
 
     #[test]
     fn stream_info_no_data_offset_errors() {
         let mut media = make_media();
         media.zip_data_start_offset = None;
-        assert!(matches!(build_zip_stream_info(&media), Err(ZipError::CorruptedArchive)));
+        assert!(matches!(
+            build_zip_stream_info(&media),
+            Err(ZipError::CorruptedArchive)
+        ));
     }
 
     #[test]
     fn stream_info_no_compressed_size_errors() {
         let mut media = make_media();
         media.zip_compressed_size = None;
-        assert!(matches!(build_zip_stream_info(&media), Err(ZipError::CorruptedArchive)));
+        assert!(matches!(
+            build_zip_stream_info(&media),
+            Err(ZipError::CorruptedArchive)
+        ));
     }
 
     #[test]
@@ -1588,7 +1640,10 @@ mod tests {
         assert_eq!(content_type_for_name("f.mov"), "video/quicktime");
         assert_eq!(content_type_for_name("f.m4v"), "video/x-m4v");
         assert_eq!(content_type_for_name("f.ts"), "video/mp2t");
-        assert_eq!(content_type_for_name("f.unknown"), "application/octet-stream");
+        assert_eq!(
+            content_type_for_name("f.unknown"),
+            "application/octet-stream"
+        );
         assert_eq!(content_type_for_name("noext"), "application/octet-stream");
     }
 
@@ -1602,8 +1657,14 @@ mod tests {
 
     #[test]
     fn is_video_path_all_extensions() {
-        for ext in &["mkv", "mp4", "avi", "mov", "webm", "m4v", "wmv", "flv", "ts"] {
-            assert!(is_video_path(&format!("file.{}", ext)), "expected {} to be video", ext);
+        for ext in &[
+            "mkv", "mp4", "avi", "mov", "webm", "m4v", "wmv", "flv", "ts",
+        ] {
+            assert!(
+                is_video_path(&format!("file.{}", ext)),
+                "expected {} to be video",
+                ext
+            );
             assert!(is_video_path(&format!("file.{}", ext.to_uppercase())));
         }
     }
@@ -1715,7 +1776,10 @@ mod tests {
         let mut media = make_media();
         media.parent_zip_id = None;
         let result = extract_zip_entry_to_path_with_progress(
-            "token", &media, Path::new("/tmp/out.mkv"), |_, _| {},
+            "token",
+            &media,
+            Path::new("/tmp/out.mkv"),
+            |_, _| {},
         );
         assert!(matches!(result, Err(ZipError::NotAValidZip)));
     }
@@ -1725,7 +1789,10 @@ mod tests {
         let mut media = make_media();
         media.zip_compressed_size = Some(0);
         let result = extract_zip_entry_to_path_with_progress(
-            "token", &media, Path::new("/tmp/out.mkv"), |_, _| {},
+            "token",
+            &media,
+            Path::new("/tmp/out.mkv"),
+            |_, _| {},
         );
         assert!(matches!(result, Err(ZipError::CorruptedArchive)));
     }
@@ -1735,7 +1802,10 @@ mod tests {
         let mut media = make_media();
         media.zip_uncompressed_size = Some((MAX_ENTRY_SIZE_BYTES + 1) as i64);
         let result = extract_zip_entry_to_path_with_progress(
-            "token", &media, Path::new("/tmp/out.mkv"), |_, _| {},
+            "token",
+            &media,
+            Path::new("/tmp/out.mkv"),
+            |_, _| {},
         );
         assert!(matches!(result, Err(ZipError::CorruptedArchive)));
     }
@@ -1745,7 +1815,10 @@ mod tests {
         let mut media = make_media();
         media.zip_crc32 = Some("ZZZZ".to_string());
         let result = extract_zip_entry_to_path_with_progress(
-            "token", &media, Path::new("/tmp/out.mkv"), |_, _| {},
+            "token",
+            &media,
+            Path::new("/tmp/out.mkv"),
+            |_, _| {},
         );
         assert!(matches!(result, Err(ZipError::CorruptedArchive)));
     }

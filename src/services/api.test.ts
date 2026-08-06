@@ -25,7 +25,7 @@ import {
 } from './api'
 import type { MediaItem, AudioTrackOption } from './api'
 
-vi.mock('@tauri-apps/api/tauri', () => ({
+vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
   convertFileSrc: vi.fn((p: string) => `asset://${p}`),
 }))

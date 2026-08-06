@@ -977,7 +977,10 @@ mod tests {
 
     #[test]
     fn detect_zip_by_extension() {
-        assert_eq!(detect_archive_format("movie.zip", None), Some(ArchiveFormat::Zip));
+        assert_eq!(
+            detect_archive_format("movie.zip", None),
+            Some(ArchiveFormat::Zip)
+        );
     }
 
     #[test]
@@ -998,8 +1001,14 @@ mod tests {
 
     #[test]
     fn detect_zip_case_insensitive_extension() {
-        assert_eq!(detect_archive_format("MOVIE.ZIP", None), Some(ArchiveFormat::Zip));
-        assert_eq!(detect_archive_format("movie.Zip", None), Some(ArchiveFormat::Zip));
+        assert_eq!(
+            detect_archive_format("MOVIE.ZIP", None),
+            Some(ArchiveFormat::Zip)
+        );
+        assert_eq!(
+            detect_archive_format("movie.Zip", None),
+            Some(ArchiveFormat::Zip)
+        );
     }
 
     #[test]
@@ -1012,7 +1021,10 @@ mod tests {
 
     #[test]
     fn detect_rar_by_extension() {
-        assert_eq!(detect_archive_format("movie.rar", None), Some(ArchiveFormat::Rar));
+        assert_eq!(
+            detect_archive_format("movie.rar", None),
+            Some(ArchiveFormat::Rar)
+        );
     }
 
     #[test]
@@ -1033,22 +1045,34 @@ mod tests {
 
     #[test]
     fn detect_rar_case_insensitive() {
-        assert_eq!(detect_archive_format("MOVIE.RAR", None), Some(ArchiveFormat::Rar));
+        assert_eq!(
+            detect_archive_format("MOVIE.RAR", None),
+            Some(ArchiveFormat::Rar)
+        );
     }
 
     #[test]
     fn detect_tar_by_extension() {
-        assert_eq!(detect_archive_format("archive.tar", None), Some(ArchiveFormat::Tar));
+        assert_eq!(
+            detect_archive_format("archive.tar", None),
+            Some(ArchiveFormat::Tar)
+        );
     }
 
     #[test]
     fn detect_tar_by_tar_gz_extension() {
-        assert_eq!(detect_archive_format("archive.tar.gz", None), Some(ArchiveFormat::Tar));
+        assert_eq!(
+            detect_archive_format("archive.tar.gz", None),
+            Some(ArchiveFormat::Tar)
+        );
     }
 
     #[test]
     fn detect_tar_by_tgz_extension() {
-        assert_eq!(detect_archive_format("archive.tgz", None), Some(ArchiveFormat::Tar));
+        assert_eq!(
+            detect_archive_format("archive.tgz", None),
+            Some(ArchiveFormat::Tar)
+        );
     }
 
     #[test]
@@ -1069,8 +1093,14 @@ mod tests {
 
     #[test]
     fn detect_tar_case_insensitive() {
-        assert_eq!(detect_archive_format("ARCHIVE.TAR.GZ", None), Some(ArchiveFormat::Tar));
-        assert_eq!(detect_archive_format("ARCHIVE.TGZ", None), Some(ArchiveFormat::Tar));
+        assert_eq!(
+            detect_archive_format("ARCHIVE.TAR.GZ", None),
+            Some(ArchiveFormat::Tar)
+        );
+        assert_eq!(
+            detect_archive_format("ARCHIVE.TGZ", None),
+            Some(ArchiveFormat::Tar)
+        );
     }
 
     #[test]
@@ -1336,7 +1366,7 @@ mod tests {
         media.parent_zip_id = Some("file123".into());
         media.archive_format = Some("zip".into());
         media.zip_compression_method = None; // defaults to 0
-        // no offsets set, so build_archive_stream_info returns Err -> method 0 fallback
+                                             // no offsets set, so build_archive_stream_info returns Err -> method 0 fallback
         let result = assess_archive_playback(&media).unwrap();
         // method is 0 but stream info fails, so falls through to "unsupported"
         assert!(!result.can_play);
@@ -1417,7 +1447,10 @@ mod tests {
         let mut media = default_media_item();
         media.parent_zip_id = Some("abc".into());
         media.file_path = Some("/local/path/archive.zip".into());
-        assert_eq!(archive_filename_for_media(&media), "/local/path/archive.zip");
+        assert_eq!(
+            archive_filename_for_media(&media),
+            "/local/path/archive.zip"
+        );
     }
 
     #[test]
@@ -1504,7 +1537,10 @@ mod tests {
         media.zip_entry_path = Some("folder/video.mp4".into());
         media.title = "My Show".into();
         let config = zip_manager::ZipCacheConfig {
-            cache_dir: std::env::temp_dir().join("archive_test_cache").to_string_lossy().to_string(),
+            cache_dir: std::env::temp_dir()
+                .join("archive_test_cache")
+                .to_string_lossy()
+                .to_string(),
             max_size_bytes: 0,
             expiry_days: 30,
         };
@@ -1520,7 +1556,10 @@ mod tests {
     fn archive_cache_path_no_parent_zip_id_errors() {
         let media = default_media_item();
         let config = zip_manager::ZipCacheConfig {
-            cache_dir: std::env::temp_dir().join("archive_test_cache").to_string_lossy().to_string(),
+            cache_dir: std::env::temp_dir()
+                .join("archive_test_cache")
+                .to_string_lossy()
+                .to_string(),
             max_size_bytes: 0,
             expiry_days: 30,
         };
@@ -1532,7 +1571,10 @@ mod tests {
         let mut media = default_media_item();
         media.parent_zip_id = Some("file1".into());
         let config = zip_manager::ZipCacheConfig {
-            cache_dir: std::env::temp_dir().join("archive_test_cache").to_string_lossy().to_string(),
+            cache_dir: std::env::temp_dir()
+                .join("archive_test_cache")
+                .to_string_lossy()
+                .to_string(),
             max_size_bytes: 0,
             expiry_days: 30,
         };
@@ -1547,13 +1589,21 @@ mod tests {
         media.file_path = Some("video.mkv".into());
         media.title = "Show".into();
         let config = zip_manager::ZipCacheConfig {
-            cache_dir: std::env::temp_dir().join("archive_test_cache").to_string_lossy().to_string(),
+            cache_dir: std::env::temp_dir()
+                .join("archive_test_cache")
+                .to_string_lossy()
+                .to_string(),
             max_size_bytes: 0,
             expiry_days: 30,
         };
         let result = archive_cache_path(&media, &config);
         assert!(result.is_ok());
-        let name = result.unwrap().file_name().unwrap().to_string_lossy().to_string();
+        let name = result
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         assert!(name.ends_with(".mkv"));
     }
 
@@ -1632,7 +1682,9 @@ mod tests {
         // no data_start_offset
         let result = build_archive_stream_info(&media);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("does not support direct streaming"));
+        assert!(result
+            .unwrap_err()
+            .contains("does not support direct streaming"));
     }
 
     #[test]

@@ -333,7 +333,10 @@ async fn proxy_stream_passthrough(
         req = req.header("Range", rh);
     }
 
-    let resp = req.send().await.map_err(|e| ProxyError::Network(e.to_string()))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| ProxyError::Network(e.to_string()))?;
     let status = resp.status();
 
     if status.as_u16() == 401 {
@@ -400,10 +403,7 @@ async fn proxy_stream_passthrough(
     Ok(())
 }
 
-async fn write_all_err(
-    stream: &mut tokio::net::TcpStream,
-    bytes: &[u8],
-) -> Result<(), ProxyError> {
+async fn write_all_err(stream: &mut tokio::net::TcpStream, bytes: &[u8]) -> Result<(), ProxyError> {
     use tokio::io::AsyncWriteExt;
     stream
         .write_all(bytes)
@@ -548,14 +548,15 @@ mod tests {
         let mock_port = mock.local_addr().unwrap().port();
         let received_raw: Arc<tokio::sync::Mutex<Vec<u8>>> =
             Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let request_count: Arc<tokio::sync::Mutex<u32>> =
-            Arc::new(tokio::sync::Mutex::new(0));
+        let request_count: Arc<tokio::sync::Mutex<u32>> = Arc::new(tokio::sync::Mutex::new(0));
 
         let raw_clone = Arc::clone(&received_raw);
         let count_clone = Arc::clone(&request_count);
         let _mock_task = tokio::spawn(async move {
             loop {
-                let Ok((mut stream, _)) = mock.accept().await else { break };
+                let Ok((mut stream, _)) = mock.accept().await else {
+                    break;
+                };
                 let raw_inner = Arc::clone(&raw_clone);
                 let count_inner = Arc::clone(&count_clone);
                 tokio::spawn(async move {
@@ -587,18 +588,14 @@ mod tests {
         // appends `/files/{file_id}?alt=media&supportsAllDrives=true`.
         let upstream_base = format!("http://127.0.0.1:{}/drive/v3", mock_port);
         let file_id = "test-file-id-12345";
-        let proxy = start_gdrive_stream_proxy_with_upstream(
-            client,
-            file_id.to_string(),
-            &upstream_base,
-        )
-        .await
-        .expect("proxy start");
-
-        let mut upstream_conn =
-            tokio::net::TcpStream::connect(("127.0.0.1", proxy.port))
+        let proxy =
+            start_gdrive_stream_proxy_with_upstream(client, file_id.to_string(), &upstream_base)
                 .await
-                .expect("connect to proxy");
+                .expect("proxy start");
+
+        let mut upstream_conn = tokio::net::TcpStream::connect(("127.0.0.1", proxy.port))
+            .await
+            .expect("connect to proxy");
         upstream_conn
             .write_all(
                 b"GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=0-99\r\nConnection: close\r\n\r\n",
@@ -620,7 +617,11 @@ mod tests {
         );
 
         let count = *request_count.lock().await;
-        assert_eq!(count, 1, "expected exactly one upstream request, got {}", count);
+        assert_eq!(
+            count, 1,
+            "expected exactly one upstream request, got {}",
+            count
+        );
 
         let raw = received_raw.lock().await.clone();
         let raw_str = std::str::from_utf8(&raw).expect("utf8");

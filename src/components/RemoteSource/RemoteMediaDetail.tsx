@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, memo } from 'react'
 import { Film, Star, Calendar, ChevronLeft, Play, Loader2, ListVideo, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { invoke } from '@tauri-apps/api/tauri'
+import { invoke } from '@tauri-apps/api/core'
 import { getCachedImageUrl } from '@/services/api'
 import { cn } from '@/lib/utils'
 import type { TmdbSearchResult } from './remote.types'

@@ -1,6 +1,6 @@
 import { useState, useCallback, useId, type DragEvent, type ChangeEvent, type KeyboardEvent } from 'react'
-import { open } from '@tauri-apps/api/dialog'
-import { invoke } from '@tauri-apps/api/tauri'
+import { open } from '@tauri-apps/plugin-dialog'
+import { invoke } from '@tauri-apps/api/core'
 import { Loader2, UploadCloud, Link2, ArrowRight, AlertTriangle, RotateCcw, X as XIcon, Film } from 'lucide-react'
 import { StremioAddonSetupCard } from './StremioAddonSetupCard'
 import type { StremioAddon } from '@/services/api'
@@ -69,13 +69,14 @@ export function AddonSetupWizard({
 
   const inputId = useId()
   const dropId = useId()
+  const isWindows = /windows/i.test(navigator.userAgent)
 
   const urlState: UrlState = setupAddonUrl.trim() === '' ? 'idle' : isLikelyUrl(setupAddonUrl.trim()) ? 'valid' : 'invalid'
 
   const installFromPath = useCallback(
     async (filePath: string) => {
       if (!filePath) return
-      if (!filePath.toLowerCase().endsWith('.exe')) {
+      if (!filePath.toLowerCase().endsWith('.exe') && isWindows) {
         onError('On Windows, the file must have an .exe extension.')
         return
       }
@@ -97,7 +98,7 @@ export function AddonSetupWizard({
         let message = raw
         if (raw.includes('--version')) message = 'That file is not a SlasshyVault-compatible addon binary.'
         else if (raw.toLowerCase().includes('too large')) message = 'File is too large. Addon binaries should be under 50 MB.'
-        else if (raw.toLowerCase().includes('.exe')) message = 'On Windows, the file must have an .exe extension.'
+        else if (raw.toLowerCase().includes('.exe') && isWindows) message = 'On Windows, the file must have an .exe extension.'
         else if (raw.toLowerCase().includes('failed to start'))
           message = 'The binary failed to start. Check that no other instance is running and the port is free.'
         onError(message)
@@ -105,14 +106,14 @@ export function AddonSetupWizard({
         setBinaryInstalling(false)
       }
     },
-    [onInstalled, onError]
+    [onInstalled, onError, isWindows]
   )
 
   const onBrowseClick = useCallback(async () => {
     try {
       const selected = await open({
         multiple: false,
-        filters: [{ name: 'Executable', extensions: ['exe'] }],
+        ...(!isWindows ? {} : { filters: [{ name: 'Executable', extensions: ['exe'] }] }),
       })
       if (selected && typeof selected === 'string') {
         await installFromPath(selected)
@@ -120,7 +121,7 @@ export function AddonSetupWizard({
     } catch (e: any) {
       onError(String(e?.message || e || 'Could not open file picker.'))
     }
-  }, [installFromPath, onError])
+  }, [installFromPath, onError, isWindows])
 
   const onDropFiles = useCallback(
     (e: DragEvent<HTMLDivElement>) => {
@@ -215,7 +216,7 @@ export function AddonSetupWizard({
               <span className="sv-rail-bullet">01</span>
               <div>
                 <p className="sv-rail-list-title">Install a binary</p>
-                <p className="sv-rail-list-sub">Drop a Windows addon binary you already have.</p>
+                <p className="sv-rail-list-sub">Drop a compatible addon binary you already have.</p>
               </div>
             </li>
             <li>
@@ -270,7 +271,7 @@ export function AddonSetupWizard({
             <div className="sv-field-head">
               <span className="sv-field-tag">01 · Install</span>
               <h2 className="sv-field-title">Drop a binary</h2>
-              <p className="sv-field-sub">A signed SlasshyVault addon <code>.exe</code> will run locally on a private port.</p>
+              <p className="sv-field-sub">A SlasshyVault addon binary will run locally on a private port.</p>
             </div>
 
             <div
@@ -310,7 +311,7 @@ export function AddonSetupWizard({
                     : 'Drop the addon binary here'}
                 </p>
                 <p className="sv-drop-line2">
-                  {binaryInstalling ? 'Hold on a moment' : 'or click to browse — .exe, no console window'}
+                  {binaryInstalling ? 'Hold on a moment' : isWindows ? 'or click to browse — .exe, no console window' : 'or click to browse — Linux executable'}
                 </p>
               </div>
               <div className="sv-drop-chev" aria-hidden="true">

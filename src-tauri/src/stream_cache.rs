@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use crate::config::Config;
 use crate::database::get_app_data_dir;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 const CACHE_EVENT: &str = "remote-cache-progress";
 const CHUNK_SIZE: u64 = 8 * 1024 * 1024;
@@ -76,7 +76,10 @@ impl CacheManager {
     }
 
     pub fn is_cache_dir_set(config: &Config) -> bool {
-        config.zip_cache_dir.as_deref().map_or(false, |d| !d.is_empty())
+        config
+            .zip_cache_dir
+            .as_deref()
+            .map_or(false, |d| !d.is_empty())
     }
 
     pub fn start(
@@ -141,14 +144,17 @@ impl CacheManager {
                     entry.status.downloaded_bytes = entry.status.total_bytes;
                 }
                 drop(active);
-                let _ = app_handle.emit_all(CACHE_EVENT, &CacheStatus {
-                    cache_key: cache_key_clone,
-                    state: CacheState::Failed { error: e },
-                    downloaded_bytes: 0,
-                    total_bytes: total_bytes as u64,
-                    speed_bytes_per_second: 0.0,
-                    target_path: String::new(),
-                });
+                let _ = app_handle.emit(
+                    CACHE_EVENT,
+                    &CacheStatus {
+                        cache_key: cache_key_clone,
+                        state: CacheState::Failed { error: e },
+                        downloaded_bytes: 0,
+                        total_bytes: total_bytes as u64,
+                        speed_bytes_per_second: 0.0,
+                        target_path: String::new(),
+                    },
+                );
             }
         });
 
@@ -216,10 +222,7 @@ impl CacheManager {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().map(|e| e == "mkv").unwrap_or(false)
-                    || path
-                        .extension()
-                        .map(|e| e == "part")
-                        .unwrap_or(false)
+                    || path.extension().map(|e| e == "part").unwrap_or(false)
                 {
                     if let Ok(metadata) = fs::metadata(&path) {
                         if let Ok(modified) = metadata.modified() {
@@ -334,7 +337,8 @@ async fn run_cache_job(
                 .map_err(|e| format!("Write error: {}", e))?;
             drop(file);
 
-            let total_dl = downloaded.fetch_add(bytes.len() as u64, Ordering::Relaxed) + bytes.len() as u64;
+            let total_dl =
+                downloaded.fetch_add(bytes.len() as u64, Ordering::Relaxed) + bytes.len() as u64;
             let elapsed = started.elapsed().as_secs_f64().max(0.001);
             let speed = total_dl as f64 / elapsed;
 
@@ -342,10 +346,12 @@ async fn run_cache_job(
                 if let Some(entry) = active.get_mut(&key) {
                     entry.status.downloaded_bytes = total_dl;
                     entry.status.speed_bytes_per_second = speed;
-                    entry.status.state = CacheState::Downloading { progress: (total_dl as f64 / total.max(1) as f64) * 100.0 };
+                    entry.status.state = CacheState::Downloading {
+                        progress: (total_dl as f64 / total.max(1) as f64) * 100.0,
+                    };
                     let status = entry.status.clone();
                     drop(active);
-                    let _ = app.emit_all(CACHE_EVENT, &status);
+                    let _ = app.emit(CACHE_EVENT, &status);
                 }
             }
 
@@ -393,8 +399,8 @@ async fn run_cache_job(
             entry.status.speed_bytes_per_second = speed;
             let status = entry.status.clone();
             drop(active);
-            let _ = app_handle.emit_all(CACHE_EVENT, &status);
-            let _ = app_handle.emit_all("remote-cache-complete", &status);
+            let _ = app_handle.emit(CACHE_EVENT, &status);
+            let _ = app_handle.emit("remote-cache-complete", &status);
         }
     }
 
@@ -439,12 +445,7 @@ mod tests {
     }
 
     /// Insert an entry directly into the manager for testing status/stop/cleanup.
-    fn insert_test_entry(
-        manager: &CacheManager,
-        key: &str,
-        state: CacheState,
-        target_path: &str,
-    ) {
+    fn insert_test_entry(manager: &CacheManager, key: &str, state: CacheState, target_path: &str) {
         let mut active = manager.lock_active().unwrap();
         active.insert(
             key.to_string(),
@@ -481,7 +482,12 @@ mod tests {
     fn clone_shares_state() {
         let mgr = CacheManager::new();
         let tmp = TempDir::new().unwrap();
-        insert_test_entry(&mgr, "k1", CacheState::Idle, tmp.path().join("f.mkv").to_str().unwrap());
+        insert_test_entry(
+            &mgr,
+            "k1",
+            CacheState::Idle,
+            tmp.path().join("f.mkv").to_str().unwrap(),
+        );
 
         let mgr2 = mgr.clone();
         assert_eq!(mgr2.all_status().len(), 1);
@@ -605,7 +611,12 @@ mod tests {
     fn stop_idle_entry_succeeds() {
         let mgr = CacheManager::new();
         let tmp = TempDir::new().unwrap();
-        insert_test_entry(&mgr, "k", CacheState::Idle, tmp.path().join("f.mkv").to_str().unwrap());
+        insert_test_entry(
+            &mgr,
+            "k",
+            CacheState::Idle,
+            tmp.path().join("f.mkv").to_str().unwrap(),
+        );
         mgr.stop("k").unwrap();
     }
 
@@ -615,7 +626,12 @@ mod tests {
     fn status_returns_entry() {
         let mgr = CacheManager::new();
         let tmp = TempDir::new().unwrap();
-        insert_test_entry(&mgr, "s1", CacheState::Idle, tmp.path().join("f.mkv").to_str().unwrap());
+        insert_test_entry(
+            &mgr,
+            "s1",
+            CacheState::Idle,
+            tmp.path().join("f.mkv").to_str().unwrap(),
+        );
 
         let s = mgr.status("s1").unwrap();
         assert_eq!(s.cache_key, "s1");
@@ -631,7 +647,12 @@ mod tests {
     #[test]
     fn status_reflects_state_changes() {
         let mgr = CacheManager::new();
-        insert_test_entry(&mgr, "x", CacheState::Downloading { progress: 42.0 }, "/tmp/f.mkv");
+        insert_test_entry(
+            &mgr,
+            "x",
+            CacheState::Downloading { progress: 42.0 },
+            "/tmp/f.mkv",
+        );
 
         let s = mgr.status("x").unwrap();
         match s.state {
@@ -718,7 +739,12 @@ mod tests {
         for i in 0..3 {
             let p = tmp.path().join(format!("f{i}.mkv"));
             std::fs::write(&p, b"x").unwrap();
-            insert_test_entry(&mgr, &format!("k{i}"), CacheState::Idle, p.to_str().unwrap());
+            insert_test_entry(
+                &mgr,
+                &format!("k{i}"),
+                CacheState::Idle,
+                p.to_str().unwrap(),
+            );
         }
 
         mgr.cleanup_all().unwrap();
@@ -822,9 +848,13 @@ mod tests {
         let states = vec![
             CacheState::Idle,
             CacheState::Downloading { progress: 75.5 },
-            CacheState::Cached { path: "/tmp/f.mkv".into() },
+            CacheState::Cached {
+                path: "/tmp/f.mkv".into(),
+            },
             CacheState::Cancelled,
-            CacheState::Failed { error: "oops".into() },
+            CacheState::Failed {
+                error: "oops".into(),
+            },
         ];
         for state in states {
             let json = serde_json::to_string(&state).unwrap();
@@ -912,7 +942,10 @@ mod tests {
 
     #[test]
     fn sanitize_filename_keeps_safe_chars() {
-        assert_eq!(sanitize_filename("hello-world_v2.0 test"), "hello-world_v2.0 test");
+        assert_eq!(
+            sanitize_filename("hello-world_v2.0 test"),
+            "hello-world_v2.0 test"
+        );
     }
 
     #[test]
@@ -953,7 +986,9 @@ mod tests {
 
     #[test]
     fn cache_state_cached_serialization() {
-        let s = CacheState::Cached { path: "/tmp/f.mkv".into() };
+        let s = CacheState::Cached {
+            path: "/tmp/f.mkv".into(),
+        };
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains(r#""type":"cached""#));
         assert!(json.contains("/tmp/f.mkv"));
@@ -968,7 +1003,9 @@ mod tests {
 
     #[test]
     fn cache_state_failed_serialization() {
-        let s = CacheState::Failed { error: "disk full".into() };
+        let s = CacheState::Failed {
+            error: "disk full".into(),
+        };
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains(r#""type":"failed""#));
         assert!(json.contains("disk full"));
@@ -1001,14 +1038,28 @@ mod tests {
     fn stop_cached_entry_succeeds() {
         let mgr = CacheManager::new();
         let tmp = TempDir::new().unwrap();
-        insert_test_entry(&mgr, "cached", CacheState::Cached { path: tmp.path().join("f.mkv").to_string_lossy().to_string() }, tmp.path().join("f.mkv").to_str().unwrap());
+        insert_test_entry(
+            &mgr,
+            "cached",
+            CacheState::Cached {
+                path: tmp.path().join("f.mkv").to_string_lossy().to_string(),
+            },
+            tmp.path().join("f.mkv").to_str().unwrap(),
+        );
         mgr.stop("cached").unwrap();
     }
 
     #[test]
     fn stop_failed_entry_succeeds() {
         let mgr = CacheManager::new();
-        insert_test_entry(&mgr, "failed", CacheState::Failed { error: "oops".into() }, "/tmp/f.mkv");
+        insert_test_entry(
+            &mgr,
+            "failed",
+            CacheState::Failed {
+                error: "oops".into(),
+            },
+            "/tmp/f.mkv",
+        );
         mgr.stop("failed").unwrap();
     }
 
@@ -1027,7 +1078,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("dl.mkv");
         std::fs::write(&path, b"partial").unwrap();
-        insert_test_entry(&mgr, "dl", CacheState::Downloading { progress: 50.0 }, path.to_str().unwrap());
+        insert_test_entry(
+            &mgr,
+            "dl",
+            CacheState::Downloading { progress: 50.0 },
+            path.to_str().unwrap(),
+        );
 
         mgr.cleanup("dl").unwrap();
         assert!(mgr.status("dl").is_none());
@@ -1070,7 +1126,12 @@ mod tests {
     #[test]
     fn status_reflects_downloading_progress() {
         let mgr = CacheManager::new();
-        insert_test_entry(&mgr, "dl1", CacheState::Downloading { progress: 75.5 }, "/tmp/f.mkv");
+        insert_test_entry(
+            &mgr,
+            "dl1",
+            CacheState::Downloading { progress: 75.5 },
+            "/tmp/f.mkv",
+        );
 
         let s = mgr.status("dl1").unwrap();
         match s.state {
@@ -1110,7 +1171,14 @@ mod tests {
     #[test]
     fn stop_sets_cancel_flag_for_cached() {
         let mgr = CacheManager::new();
-        insert_test_entry(&mgr, "sc", CacheState::Cached { path: "/f.mkv".into() }, "/f.mkv");
+        insert_test_entry(
+            &mgr,
+            "sc",
+            CacheState::Cached {
+                path: "/f.mkv".into(),
+            },
+            "/f.mkv",
+        );
         mgr.stop("sc").unwrap();
         let guard = mgr.lock_active().unwrap();
         let entry = guard.get("sc").unwrap();
@@ -1123,8 +1191,20 @@ mod tests {
     fn cleanup_all_removes_all_entries_from_map() {
         let mgr = CacheManager::new();
         insert_test_entry(&mgr, "x1", CacheState::Idle, "/x1.mkv");
-        insert_test_entry(&mgr, "x2", CacheState::Downloading { progress: 50.0 }, "/x2.mkv");
-        insert_test_entry(&mgr, "x3", CacheState::Cached { path: "/x3.mkv".into() }, "/x3.mkv");
+        insert_test_entry(
+            &mgr,
+            "x2",
+            CacheState::Downloading { progress: 50.0 },
+            "/x2.mkv",
+        );
+        insert_test_entry(
+            &mgr,
+            "x3",
+            CacheState::Cached {
+                path: "/x3.mkv".into(),
+            },
+            "/x3.mkv",
+        );
 
         mgr.cleanup_all().unwrap();
         assert!(mgr.status("x1").is_none());

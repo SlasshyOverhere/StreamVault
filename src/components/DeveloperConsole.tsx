@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { LazyMotion, m, AnimatePresence, domAnimation } from "framer-motion";
-import { invoke } from "@tauri-apps/api/tauri";
+import { invoke } from "@tauri-apps/api/core";
 import { Trash2, Terminal, ChevronDown, ChevronUp } from "lucide-react";
 import { cn } from "@/lib/utils";
 

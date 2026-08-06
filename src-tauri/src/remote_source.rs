@@ -43,19 +43,27 @@ pub fn validate_hubdrive_url(url: &str) -> Result<(bool, String), String> {
     let client = crate::http_client::shared_client();
     let resp = client
         .get(url)
-        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        )
         .timeout(Duration::from_secs(10))
         .send()
         .map_err(|e| format!("Request failed: {}", e))?;
     let body = resp.text().map_err(|e| e.to_string())?;
     let title = if let Some(s) = body.find("<title>") {
         let after = &body[s + 7..];
-        after.find("</title>").map(|e| after[..e].trim().to_string()).unwrap_or_default()
+        after
+            .find("</title>")
+            .map(|e| after[..e].trim().to_string())
+            .unwrap_or_default()
     } else {
         String::new()
     };
     let lower = title.to_lowercase();
-    let expired = lower.contains("g-drive file sharing") || lower.contains("g=drive") || lower.contains("shorten your google drive");
+    let expired = lower.contains("g-drive file sharing")
+        || lower.contains("g=drive")
+        || lower.contains("shorten your google drive");
     Ok((!expired, title))
 }
 
@@ -66,7 +74,9 @@ fn extract_episode_number(name: &str, description: &str) -> Option<i32> {
     for cap in combined.split(|c: char| !c.is_ascii_alphanumeric()) {
         if cap.len() >= 2 && (cap.starts_with('E') || cap.starts_with('e')) {
             if let Ok(n) = cap[1..].parse::<i32>() {
-                if n > 0 && n < 1000 { return Some(n); }
+                if n > 0 && n < 1000 {
+                    return Some(n);
+                }
             }
         }
     }
@@ -77,7 +87,9 @@ fn extract_episode_number(name: &str, description: &str) -> Option<i32> {
             let rest = &combined[pos + prefix.len()..];
             let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
             if let Ok(n) = num_str.parse::<i32>() {
-                if n > 0 && n < 1000 { return Some(n); }
+                if n > 0 && n < 1000 {
+                    return Some(n);
+                }
             }
         }
     }
@@ -150,8 +162,16 @@ pub fn parse_source(name: &str) -> String {
     }
 }
 
-pub fn fetch_movie_streams(imdb_id: &str, base_url: &str, _force_refresh: bool) -> Result<Vec<RemoteStream>, String> {
-    let url = format!("{}/stream/movie/{}.json", base_url.trim_end_matches('/'), imdb_id);
+pub fn fetch_movie_streams(
+    imdb_id: &str,
+    base_url: &str,
+    _force_refresh: bool,
+) -> Result<Vec<RemoteStream>, String> {
+    let url = format!(
+        "{}/stream/movie/{}.json",
+        base_url.trim_end_matches('/'),
+        imdb_id
+    );
     let streams = fetch_and_parse_streams(&url)?;
     Ok(streams)
 }
@@ -256,7 +276,6 @@ fn fetch_and_parse_streams(url: &str) -> Result<Vec<RemoteStream>, String> {
             .map_err(|e| format!("Failed to read response body: {}", e))?;
 
         return parse_streams_body(&body);
-
     }
 
     Err(format!(
@@ -266,8 +285,8 @@ fn fetch_and_parse_streams(url: &str) -> Result<Vec<RemoteStream>, String> {
 }
 
 fn parse_streams_body(body: &str) -> Result<Vec<RemoteStream>, String> {
-    let raw: StreamsResponse = serde_json::from_str(body)
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
+    let raw: StreamsResponse =
+        serde_json::from_str(body).map_err(|e| format!("Failed to parse response: {}", e))?;
 
     let streams: Vec<RemoteStream> = raw
         .streams
@@ -316,13 +335,11 @@ pub fn group_streams(streams: Vec<RemoteStream>) -> Vec<GroupedStreams> {
         .filter_map(|(quality, mut streams)| {
             // Recommended streams first within each group, then by video size descending
             streams.sort_by(|a, b| {
-                b.recommended
-                    .cmp(&a.recommended)
-                    .then_with(|| {
-                        b.video_size
-                            .partial_cmp(&a.video_size)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
+                b.recommended.cmp(&a.recommended).then_with(|| {
+                    b.video_size
+                        .partial_cmp(&a.video_size)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
             });
             let rank = quality_order
                 .iter()
@@ -337,9 +354,7 @@ pub fn group_streams(streams: Vec<RemoteStream>) -> Vec<GroupedStreams> {
     result.sort_by(|(ra, _, sa), (rb, _, sb)| {
         let a_has_rec = sa.iter().any(|s| s.recommended);
         let b_has_rec = sb.iter().any(|s| s.recommended);
-        b_has_rec
-            .cmp(&a_has_rec)
-            .then_with(|| ra.cmp(rb))
+        b_has_rec.cmp(&a_has_rec).then_with(|| ra.cmp(rb))
     });
 
     result
